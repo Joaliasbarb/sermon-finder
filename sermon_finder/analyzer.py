@@ -1,4 +1,5 @@
 import re
+import sys
 from typing import Protocol, runtime_checkable
 
 import anthropic
@@ -97,7 +98,14 @@ def find_sermon_start(
     if not chunks:
         raise ValueError("No transcript segments provided.")
 
-    for chunk in chunks:
+    total = len(chunks)
+    for i, chunk in enumerate(chunks, 1):
+        start_ts = _format_timestamp(chunk[0]["start"])
+        end_ts = _format_timestamp(chunk[-1]["end"])
+        print(
+            f"Analysing chunk {i}/{total} [{start_ts} – {end_ts}]...",
+            file=sys.stderr,
+        )
         transcript = _format_chunk(chunk)
         user_msg = (
             "Here is the timestamped transcript. "

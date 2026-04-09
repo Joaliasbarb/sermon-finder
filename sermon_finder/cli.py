@@ -48,17 +48,11 @@ def main(audio_file: str, model: str, verbose: bool) -> None:
         pass
 
     try:
-        if verbose:
-            click.echo("Preparing audio...", err=True)
+        click.echo("Preparing audio...", err=True)
 
         with audio.prepare_audio(audio_file) as wav_path:
-            if verbose:
-                click.echo(f"Transcribing with Whisper ({model} model)...", err=True)
-
-            segments = transcriber.transcribe(wav_path, model_size=model)
-
-            if verbose:
-                click.echo(f"Transcribed {len(segments)} segments. Analysing...", err=True)
+            segments = transcriber.transcribe(wav_path, model_size=model, verbose=verbose)
+            click.echo(f"Transcribed {len(segments)} segments.", err=True)
 
             provider = ClaudeProvider()
             minutes, seconds = analyzer.find_sermon_start(segments, provider=provider)

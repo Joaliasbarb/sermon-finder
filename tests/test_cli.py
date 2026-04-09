@@ -47,7 +47,7 @@ def test_happy_path_stdout(runner, sample_wav):
          patch("sermon_finder.cli.analyzer.find_sermon_start", mocks["sermon_finder.analyzer.find_sermon_start"]):
         result = runner.invoke(main, [sample_wav], env={"ANTHROPIC_API_KEY": "test"})
     assert result.exit_code == 0
-    assert result.output.strip() == "35'42"
+    assert "35'42" in result.output
 
 
 def test_timestamp_format_zero_padded_seconds(runner, sample_wav):
@@ -56,7 +56,7 @@ def test_timestamp_format_zero_padded_seconds(runner, sample_wav):
          patch("sermon_finder.cli.transcriber.transcribe", mocks["sermon_finder.transcriber.transcribe"]), \
          patch("sermon_finder.cli.analyzer.find_sermon_start", mocks["sermon_finder.analyzer.find_sermon_start"]):
         result = runner.invoke(main, [sample_wav], env={"ANTHROPIC_API_KEY": "test"})
-    assert result.output.strip() == "12'05"
+    assert "12'05" in result.output
 
 
 def test_sermon_not_found_exits_with_error(runner, sample_wav):
