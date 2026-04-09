@@ -2,6 +2,9 @@ import os
 import sys
 
 import click
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from sermon_finder import audio, transcriber, analyzer
 from sermon_finder.analyzer import ClaudeProvider
