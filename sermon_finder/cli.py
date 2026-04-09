@@ -14,7 +14,7 @@ from sermon_finder.analyzer import ClaudeProvider
 @click.argument("audio_file", metavar="AUDIO_FILE")
 @click.option(
     "--model",
-    default="medium",
+    default="small",
     show_default=True,
     metavar="SIZE",
     help=(
@@ -24,12 +24,24 @@ from sermon_finder.analyzer import ClaudeProvider
     ),
 )
 @click.option(
+    "--workers",
+    default=1,
+    show_default=True,
+    metavar="N",
+    help=(
+        "Number of parallel transcription workers. "
+        "Each worker loads its own copy of the Whisper model "
+        "(e.g. 2 workers × 2 GB = 4 GB for 'small'). "
+        "Default: 1 (sequential)."
+    ),
+)
+@click.option(
     "--verbose", "-v",
     is_flag=True,
     help="Print each transcribed segment to stderr as it is produced.",
 )
 @click.version_option(version="0.1.0")
-def main(audio_file: str, model: str, verbose: bool) -> None:
+def main(audio_file: str, model: str, workers: int, verbose: bool) -> None:
     """Find the timestamp when the sermon begins in a church service recording.
 
     AUDIO_FILE is the path to the audio file (MP3, WAV, M4A, …).
@@ -83,7 +95,7 @@ def main(audio_file: str, model: str, verbose: bool) -> None:
         click.echo("Preparing audio...", err=True)
 
         with audio.prepare_audio(audio_file) as wav_path:
-            segments = transcriber.transcribe(wav_path, model_size=model, verbose=verbose)
+            segments = transcriber.transcribe(wav_path, model_size=model, verbose=verbose, num_workers=workers)
             click.echo(f"Transcribed {len(segments)} segments.", err=True)
 
             provider = ClaudeProvider()

@@ -1,5 +1,6 @@
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Protocol, runtime_checkable
 
 import anthropic
@@ -79,17 +80,33 @@ def _parse_response(response: str) -> tuple[int, int] | None:
     return None
 
 
+def _query_chunk(
+    chunk: list[dict],
+    provider: LLMProvider,
+    index: int,
+    total: int,
+) -> tuple[int, int] | None:
+    start_ts = _format_timestamp(chunk[0]["start"])
+    end_ts = _format_timestamp(chunk[-1]["end"])
+    print(f"Analysing chunk {index}/{total} [{start_ts} – {end_ts}]...", file=sys.stderr)
+    transcript = _format_chunk(chunk)
+    user_msg = (
+        "Here is the timestamped transcript. "
+        "Identify where the sermon begins:\n\n" + transcript
+    )
+    response = provider.complete(SYSTEM_PROMPT, user_msg)
+    return _parse_response(response)
+
+
 def find_sermon_start(
     segments: list[dict],
     provider: LLMProvider | None = None,
 ) -> tuple[int, int]:
     """Find the timestamp when the sermon begins.
 
-    Analyzes the transcript in overlapping 10-minute chunks, querying the
-    LLM for each chunk until the sermon start is identified.
-
-    Returns (minutes, seconds).
-    Raises ValueError if the sermon start cannot be found.
+    Analyses the transcript in two passes — first half then second half —
+    with all chunks in each pass queried in parallel. Returns the earliest
+    detected timestamp. Raises ValueError if nothing is found.
     """
     if provider is None:
         provider = ClaudeProvider()
@@ -99,21 +116,28 @@ def find_sermon_start(
         raise ValueError("No transcript segments provided.")
 
     total = len(chunks)
-    for i, chunk in enumerate(chunks, 1):
-        start_ts = _format_timestamp(chunk[0]["start"])
-        end_ts = _format_timestamp(chunk[-1]["end"])
-        print(
-            f"Analysing chunk {i}/{total} [{start_ts} – {end_ts}]...",
-            file=sys.stderr,
-        )
-        transcript = _format_chunk(chunk)
-        user_msg = (
-            "Here is the timestamped transcript. "
-            "Identify where the sermon begins:\n\n" + transcript
-        )
-        response = provider.complete(SYSTEM_PROMPT, user_msg)
-        result = _parse_response(response)
-        if result is not None:
-            return result
+    mid = (total + 1) // 2  # ceiling: first half is equal or 1 larger
+
+    for batch_start, batch_end in [(0, mid), (mid, total)]:
+        batch = chunks[batch_start:batch_end]
+        if not batch:
+            continue
+
+        with ThreadPoolExecutor() as executor:
+            futures = {
+                executor.submit(
+                    _query_chunk, chunk, provider, batch_start + i + 1, total
+                ): chunk
+                for i, chunk in enumerate(batch)
+            }
+            hits: list[tuple[int, int]] = []
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    hits.append(result)
+
+        if hits:
+            hits.sort()  # (minutes, seconds) — pick earliest audio timestamp
+            return hits[0]
 
     raise ValueError("Could not find the sermon start in the transcript.")

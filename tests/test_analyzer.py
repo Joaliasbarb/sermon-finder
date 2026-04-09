@@ -79,22 +79,57 @@ def test_parse_response_unrecognised():
 
 # --- find_sermon_start tests ---
 
-def test_find_sermon_start_first_chunk():
+def test_find_sermon_start_found_immediately():
+    """Single chunk — sermon found on the only API call."""
     provider = MagicMock()
-    provider.complete.return_value = "[35:42]"
-    segments = [seg(i * 60, i * 60 + 50) for i in range(40)]
+    provider.complete.return_value = "[05:00]"
+    segments = [seg(i * 60, i * 60 + 50) for i in range(8)]  # 8 min → 1 chunk
     result = find_sermon_start(segments, provider=provider)
-    assert result == (35, 42)
+    assert result == (5, 0)
     assert provider.complete.call_count == 1
 
 
-def test_find_sermon_start_second_chunk():
-    provider = MagicMock()
-    provider.complete.side_effect = ["not found", "[22:15]"]
+def test_find_sermon_start_fallback_to_second_half():
+    """First-half chunks return nothing; second-half chunk has the answer."""
+    # 25 min → 3 chunks (mid=2); second half = chunk starting at 18 min
     segments = [seg(i * 60, i * 60 + 50) for i in range(25)]
+
+    def respond(system, user):
+        return "[22:15]" if "[18:00]" in user else "not found"
+
+    provider = MagicMock()
+    provider.complete.side_effect = respond
     result = find_sermon_start(segments, provider=provider)
     assert result == (22, 15)
-    assert provider.complete.call_count == 2
+
+
+def test_find_sermon_start_earliest_timestamp_wins():
+    """Two chunks in the same batch both match — earliest timestamp returned."""
+    # 22 min → 3 chunks (mid=2); both first-half chunks respond positively
+    segments = [seg(i * 60, i * 60 + 50) for i in range(22)]
+
+    def respond(system, user):
+        if "[00:00]" in user:   # chunk 1 starts at 0:00
+            return "[05:30]"
+        if "[09:00]" in user:   # chunk 2 starts at 9:00
+            return "[12:00]"
+        return "not found"
+
+    provider = MagicMock()
+    provider.complete.side_effect = respond
+    result = find_sermon_start(segments, provider=provider)
+    assert result == (5, 30)   # 5:30 < 12:00
+
+
+def test_find_sermon_start_second_half_not_queried_when_first_half_matches():
+    """When first half finds the sermon, second half chunks are never queried."""
+    # 40 min → 5 chunks (mid=3); first half has 3 chunks, second half has 2
+    segments = [seg(i * 60, i * 60 + 50) for i in range(40)]
+    provider = MagicMock()
+    provider.complete.return_value = "[35:42]"
+    result = find_sermon_start(segments, provider=provider)
+    assert result == (35, 42)
+    assert provider.complete.call_count == 3   # only the 3 first-half chunks
 
 
 def test_find_sermon_start_not_found_raises():

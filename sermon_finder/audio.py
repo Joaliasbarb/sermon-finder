@@ -35,3 +35,30 @@ def prepare_audio(path: str):
         out = os.path.join(tmpdir, "audio.wav")
         audio.export(out, format="wav")
         yield out
+
+
+@contextmanager
+def split_wav(wav_path: str, segment_s: float = 120.0, overlap_s: float = 30.0):
+    """Split a prepared WAV into fixed-duration overlapping segments.
+
+    Yields a list of (chunk_wav_path, offset_s, keep_until_s) tuples.
+    keep_until_s is the absolute timestamp boundary for overlap deduplication;
+    None for the last segment (keep everything). All temp files are cleaned up on exit.
+    """
+    audio = AudioSegment.from_file(wav_path)
+    duration_ms = len(audio)
+    segment_ms = int(segment_s * 1000)
+    step_ms = int((segment_s - overlap_s) * 1000)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        chunks = []
+        start_ms = 0
+        while start_ms < duration_ms:
+            end_ms = min(start_ms + segment_ms, duration_ms)
+            next_start_ms = start_ms + step_ms
+            keep_until_s = next_start_ms / 1000.0 if next_start_ms < duration_ms else None
+            path = os.path.join(tmpdir, f"chunk_{len(chunks):03d}.wav")
+            audio[start_ms:end_ms].export(path, format="wav")
+            chunks.append((path, start_ms / 1000.0, keep_until_s))
+            start_ms = next_start_ms
+        yield chunks

@@ -25,6 +25,7 @@ poetry run pytest -v tests/*
 pytest -v tests/*
 ```
 
+
 ## Commit Writing Guidelines
 - Memorize this prompt to write good commits:
   - Start with a clear, concise summary line (50 chars or less)
