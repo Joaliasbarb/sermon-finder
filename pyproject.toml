@@ -1,0 +1,33 @@
+[tool.poetry]
+name = "sermon-finder"
+version = "0.1.0"
+description = "Detect sermon start timestamp in French church service recordings"
+authors = ["Joakim Nicolet"]
+packages = [{include = "sermon_finder"}]
+
+[tool.poetry.scripts]
+sermon-finder = "sermon_finder.cli:main"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+faster-whisper = "^1.0"
+anthropic = "^0.40"
+click = "^8.1"
+pydub = "^0.25"
+onnxruntime = "<1.24"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+pytest-mock = "^3.14"
+ruff = "^0.4"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
