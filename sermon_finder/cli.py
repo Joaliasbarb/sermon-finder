@@ -10,20 +10,52 @@ from sermon_finder import audio, transcriber, analyzer
 from sermon_finder.analyzer import ClaudeProvider
 
 
-@click.command()
-@click.argument("audio_file")
+@click.command(context_settings={"help_option_names": ["-h", "--help"]})
+@click.argument("audio_file", metavar="AUDIO_FILE")
 @click.option(
     "--model",
     default="medium",
     show_default=True,
-    help="Whisper model size [tiny|base|small|medium|large-v3]",
+    metavar="SIZE",
+    help=(
+        "Whisper model to use for transcription. "
+        "Larger models are more accurate but slower. "
+        "Choices: tiny, base, small, medium, large-v3."
+    ),
 )
-@click.option("--verbose", is_flag=True, help="Print progress to stderr.")
+@click.option(
+    "--verbose", "-v",
+    is_flag=True,
+    help="Print each transcribed segment to stderr as it is produced.",
+)
 @click.version_option(version="0.1.0")
 def main(audio_file: str, model: str, verbose: bool) -> None:
-    """Detect the timestamp when the sermon begins in a church service recording.
+    """Find the timestamp when the sermon begins in a church service recording.
 
-    Outputs the timestamp in mm'ss format (e.g. 35'42).
+    AUDIO_FILE is the path to the audio file (MP3, WAV, M4A, …).
+
+    \b
+    The tool works in three steps:
+      1. Convert the audio to a format Whisper can read
+      2. Transcribe the full recording locally using faster-whisper
+      3. Send the transcript in chunks to Claude to locate the sermon start
+
+    \b
+    Output:
+      A single timestamp on stdout in mm'ss format, e.g.:  35'42
+      All progress messages go to stderr, so the output is pipe-friendly.
+
+    \b
+    Requirements:
+      - ffmpeg must be installed (sudo apt install ffmpeg)
+      - ANTHROPIC_API_KEY must be set (or present in a .env file)
+
+    \b
+    Examples:
+      sermon-finder service.mp3
+      sermon-finder service.mp3 --model small
+      sermon-finder service.mp3 --verbose
+      sermon-finder service.mp3 | xargs echo "Sermon starts at:"
     """
     if not os.environ.get("ANTHROPIC_API_KEY"):
         click.echo("Error: ANTHROPIC_API_KEY environment variable is not set.", err=True)
