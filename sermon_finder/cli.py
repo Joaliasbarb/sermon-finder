@@ -136,11 +136,9 @@ def main(audio_file: str, model: str, workers: int, verbose: bool, no_diarize: b
                                     win_path, win_start, keep_until_s=None,
                                     model_size=model, thread_local=thread_local,
                                 )
-                            try:
-                                found = analyzer.find_sermon_start(segs, provider=provider)
+                            if analyzer.is_sermon_transition(segs, provider=provider):
+                                found = (int(t) // 60, int(t) % 60)
                                 break
-                            except ValueError:
-                                pass
 
                         if found:
                             break

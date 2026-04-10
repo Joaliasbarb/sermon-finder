@@ -9,6 +9,13 @@ CLAUDE_MODEL = "claude-sonnet-4-5"
 CHUNK_SECONDS = 10 * 60   # 10-minute windows
 OVERLAP_SECONDS = 1 * 60  # 1-minute overlap between windows
 
+TRANSITION_SYSTEM_PROMPT = """\
+You are analyzing a French Protestant church service transcript around a detected speaker change.
+Determine whether this transition is the moment the service president finishes introducing
+the preacher and the preacher begins speaking (i.e., the start of the sermon).
+Answer with exactly YES or NO.\
+"""
+
 SYSTEM_PROMPT = """\
 You are an assistant analyzing French Protestant church worship service transcripts.
 Identify when the sermon (prédication) begins. The transition is:
@@ -36,6 +43,23 @@ class ClaudeProvider:
             messages=[{"role": "user", "content": user}],
         )
         return response.content[0].text.strip()
+
+
+def is_sermon_transition(
+    segments: list[dict],
+    provider: LLMProvider | None = None,
+) -> bool:
+    """Return True if the transcript around a speaker transition is the sermon start."""
+    if provider is None:
+        provider = ClaudeProvider()
+    transcript = _format_chunk(segments)
+    user_msg = (
+        "Here is the transcript around a detected speaker transition. "
+        "Is this the moment the service president hands over to the preacher?\n\n"
+        + transcript
+    )
+    response = provider.complete(TRANSITION_SYSTEM_PROMPT, user_msg)
+    return response.strip().upper().startswith("YES")
 
 
 def _format_timestamp(seconds: float) -> str:

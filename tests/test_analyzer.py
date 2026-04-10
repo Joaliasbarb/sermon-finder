@@ -8,6 +8,7 @@ from sermon_finder.analyzer import (
     _make_chunks,
     _parse_response,
     find_sermon_start,
+    is_sermon_transition,
 )
 
 
@@ -156,3 +157,32 @@ def test_claude_provider_api_call():
     assert kwargs["max_tokens"] == 20
     assert kwargs["system"] == "system msg"
     assert kwargs["messages"] == [{"role": "user", "content": "user msg"}]
+
+
+# --- is_sermon_transition tests ---
+
+def test_is_sermon_transition_yes():
+    provider = MagicMock()
+    provider.complete.return_value = "YES"
+    assert is_sermon_transition([seg(0, 5)], provider=provider) is True
+
+
+def test_is_sermon_transition_no():
+    provider = MagicMock()
+    provider.complete.return_value = "NO"
+    assert is_sermon_transition([seg(0, 5)], provider=provider) is False
+
+
+def test_is_sermon_transition_yes_case_insensitive():
+    provider = MagicMock()
+    provider.complete.return_value = "yes, this is the transition"
+    assert is_sermon_transition([seg(0, 5)], provider=provider) is True
+
+
+def test_is_sermon_transition_uses_correct_prompts():
+    provider = MagicMock()
+    provider.complete.return_value = "NO"
+    is_sermon_transition([seg(60, 65, "Bonjour frères")], provider=provider)
+    system, user = provider.complete.call_args[0]
+    assert "YES" in system and "NO" in system
+    assert "Bonjour frères" in user
