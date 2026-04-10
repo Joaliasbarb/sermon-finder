@@ -131,7 +131,7 @@ def main(audio_file: str, model: str, workers: int, verbose: bool, no_diarize: b
                         )
 
                         for t in transitions:
-                            with audio.extract_window(wav_path, t - 90.0, t + 90.0) as (win_path, win_start):
+                            with audio.extract_window(wav_path, t - 30.0, t + 30.0) as (win_path, win_start):
                                 segs = transcriber.transcribe_segment(
                                     win_path, win_start, keep_until_s=None,
                                     model_size=model, thread_local=thread_local,
