@@ -1,6 +1,12 @@
+import logging
 import threading
 
+import ctranslate2
 from faster_whisper import WhisperModel
+
+# faster-whisper / ctranslate2 emits a warning when float16 weights are
+# silently converted to float32 on CPU. Suppress it — it is expected and harmless.
+ctranslate2.set_log_level(logging.ERROR)
 
 
 def transcribe_segment(
