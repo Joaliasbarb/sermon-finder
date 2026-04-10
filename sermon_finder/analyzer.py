@@ -1,28 +1,35 @@
-import re
-import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Protocol, runtime_checkable
 
 import anthropic
 
 CLAUDE_MODEL = "claude-sonnet-4-5"
-CHUNK_SECONDS = 10 * 60   # 10-minute windows
-OVERLAP_SECONDS = 1 * 60  # 1-minute overlap between windows
 
 TRANSITION_SYSTEM_PROMPT = """\
 You are analyzing a French Protestant church service transcript around a detected speaker change.
-Determine whether this transition is the moment the service president finishes introducing
-the preacher and the preacher begins speaking (i.e., the start of the sermon).
-Answer with exactly YES or NO.\
-"""
+Your task: determine whether this transition marks the start of the sermon (prédication).
 
-SYSTEM_PROMPT = """\
-You are an assistant analyzing French Protestant church worship service transcripts.
-Identify when the sermon (prédication) begins. The transition is:
-the service president finishes introducing the preacher → the preacher begins with a
-thematic opening statement. This is a content/speaker transition, not an acoustic one.
-If this chunk contains the sermon start, respond with ONLY the timestamp: [mm:ss]
-If the sermon has not started yet in this chunk, respond with: not found\
+Structure of a French Protestant service immediately before the sermon:
+- The service president leads the liturgy. Just before the sermon they may:
+  • Read one or more Bible passages, then step aside
+  • Lead a prayer (for the sunday school children, for the preaching, or other),
+    often closing with "Amen", then step aside
+  • The congregation may sing a hymn right before the sermon, in which case the
+    transcript may show no president speech immediately before the preacher starts
+- The hand-over is not always explicit; it can be silent or abrupt.
+- Very occasionally the president and the preacher are the same person.
+
+How the preacher typically begins (any combination is possible):
+- Greets the assembly ("Frères et sœurs…", "Bonjour…", etc.)
+- Relays salutations from another church or community
+- Opens with a prayer of their own
+- Announces a Bible passage ("Ouvrez votre Bible en…", "Tournez-vous en…")
+- Moves directly into the sermon theme or content
+
+Key signal: after this transition the new speaker holds the floor in a sustained,
+substantive way as the preacher — not merely for a short reading or a liturgical element.
+
+Answer with exactly YES if this transition is the start of the sermon,
+or NO if it is any other speaker change within the liturgy.\
 """
 
 
@@ -55,7 +62,7 @@ def is_sermon_transition(
     transcript = _format_chunk(segments)
     user_msg = (
         "Here is the transcript around a detected speaker transition. "
-        "Is this the moment the service president hands over to the preacher?\n\n"
+        "Is this the start of the sermon (prédication)?\n\n"
         + transcript
     )
     response = provider.complete(TRANSITION_SYSTEM_PROMPT, user_msg)
@@ -73,95 +80,3 @@ def _format_chunk(segments: list[dict]) -> str:
         f"[{_format_timestamp(seg['start'])}] {seg['text']}"
         for seg in segments
     )
-
-
-def _make_chunks(segments: list[dict]) -> list[list[dict]]:
-    """Split segments into overlapping fixed-duration windows."""
-    if not segments:
-        return []
-
-    chunks = []
-    window_start = segments[0]["start"]
-    total_end = segments[-1]["end"]
-
-    while window_start < total_end:
-        window_end = window_start + CHUNK_SECONDS
-        chunk = [s for s in segments if window_start <= s["start"] < window_end]
-        if chunk:
-            chunks.append(chunk)
-        window_start += CHUNK_SECONDS - OVERLAP_SECONDS
-
-    return chunks
-
-
-def _parse_response(response: str) -> tuple[int, int] | None:
-    """Return (minutes, seconds) if a timestamp is found, None otherwise."""
-    if "not found" in response.lower():
-        return None
-    match = re.search(r'\[(\d+):(\d+)\]', response)
-    if match:
-        return int(match.group(1)), int(match.group(2))
-    return None
-
-
-def _query_chunk(
-    chunk: list[dict],
-    provider: LLMProvider,
-    index: int,
-    total: int,
-) -> tuple[int, int] | None:
-    start_ts = _format_timestamp(chunk[0]["start"])
-    end_ts = _format_timestamp(chunk[-1]["end"])
-    print(f"Analysing chunk {index}/{total} [{start_ts} – {end_ts}]...", file=sys.stderr)
-    transcript = _format_chunk(chunk)
-    user_msg = (
-        "Here is the timestamped transcript. "
-        "Identify where the sermon begins:\n\n" + transcript
-    )
-    response = provider.complete(SYSTEM_PROMPT, user_msg)
-    return _parse_response(response)
-
-
-def find_sermon_start(
-    segments: list[dict],
-    provider: LLMProvider | None = None,
-) -> tuple[int, int]:
-    """Find the timestamp when the sermon begins.
-
-    Analyses the transcript in two passes — first half then second half —
-    with all chunks in each pass queried in parallel. Returns the earliest
-    detected timestamp. Raises ValueError if nothing is found.
-    """
-    if provider is None:
-        provider = ClaudeProvider()
-
-    chunks = _make_chunks(segments)
-    if not chunks:
-        raise ValueError("No transcript segments provided.")
-
-    total = len(chunks)
-    mid = (total + 1) // 2  # ceiling: first half is equal or 1 larger
-
-    for batch_start, batch_end in [(0, mid), (mid, total)]:
-        batch = chunks[batch_start:batch_end]
-        if not batch:
-            continue
-
-        with ThreadPoolExecutor() as executor:
-            futures = {
-                executor.submit(
-                    _query_chunk, chunk, provider, batch_start + i + 1, total
-                ): chunk
-                for i, chunk in enumerate(batch)
-            }
-            hits: list[tuple[int, int]] = []
-            for future in as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    hits.append(result)
-
-        if hits:
-            hits.sort()  # (minutes, seconds) — pick earliest audio timestamp
-            return hits[0]
-
-    raise ValueError("Could not find the sermon start in the transcript.")

@@ -2280,4 +2280,4 @@ tqdm = "*"
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "efe8669ddd53146418715ef04842e794a58045938bb81afe77531af16f7c9798"
+content-hash = "3985385e293e984f67bd7baf6c05309038a00009fbffef8be6b7fe7261c9e5b9"
