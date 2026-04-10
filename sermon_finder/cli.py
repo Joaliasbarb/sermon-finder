@@ -40,8 +40,17 @@ from sermon_finder.analyzer import ClaudeProvider
     is_flag=True,
     help="Print each transcribed segment to stderr as it is produced.",
 )
+@click.option(
+    "--no-diarize",
+    is_flag=True,
+    default=False,
+    help=(
+        "Disable speaker-diarization-guided detection and fall back to "
+        "full transcription + LLM scan."
+    ),
+)
 @click.version_option(version="0.1.0")
-def main(audio_file: str, model: str, workers: int, verbose: bool) -> None:
+def main(audio_file: str, model: str, workers: int, verbose: bool, no_diarize: bool) -> None:
     """Find the timestamp when the sermon begins in a church service recording.
 
     AUDIO_FILE is the path to the audio file (MP3, WAV, M4A, …).
@@ -92,14 +101,61 @@ def main(audio_file: str, model: str, workers: int, verbose: bool) -> None:
         pass
 
     try:
+        import threading
+        from sermon_finder import diarizer as _diarizer
+
         click.echo("Preparing audio...", err=True)
 
         with audio.prepare_audio(audio_file) as wav_path:
-            segments = transcriber.transcribe(wav_path, model_size=model, verbose=verbose, num_workers=workers)
-            click.echo(f"Transcribed {len(segments)} segments.", err=True)
+            if not no_diarize:
+                thread_local = threading.local()
+                found: tuple[int, int] | None = None
+                provider = ClaudeProvider()
 
-            provider = ClaudeProvider()
-            minutes, seconds = analyzer.find_sermon_start(segments, provider=provider)
+                with audio.split_wav(wav_path, segment_s=240.0, overlap_s=30.0) as chunks:
+                    for i, (chunk_path, offset_s, _keep) in enumerate(chunks, 1):
+                        click.echo(
+                            f"Segment {i}/{len(chunks)} [{offset_s / 60:.1f} min] — diarizing...",
+                            err=True,
+                        )
+                        speaker_segs = _diarizer.run_diarization(chunk_path, offset_s)
+                        transitions = _diarizer.get_speaker_transitions(speaker_segs)
+
+                        if not transitions:
+                            click.echo("  No speaker transitions — skipping.", err=True)
+                            continue
+
+                        click.echo(
+                            f"  {len(transitions)} transition(s) — transcribing windows...",
+                            err=True,
+                        )
+
+                        for t in transitions:
+                            with audio.extract_window(wav_path, t - 90.0, t + 90.0) as (win_path, win_start):
+                                segs = transcriber.transcribe_segment(
+                                    win_path, win_start, keep_until_s=None,
+                                    model_size=model, thread_local=thread_local,
+                                )
+                            try:
+                                found = analyzer.find_sermon_start(segs, provider=provider)
+                                break
+                            except ValueError:
+                                pass
+
+                        if found:
+                            break
+
+                if found is None:
+                    raise ValueError("Could not find the sermon start in any detected transition.")
+
+                minutes, seconds = found
+
+            else:
+                segments = transcriber.transcribe(wav_path, model_size=model, verbose=verbose, num_workers=workers)
+                click.echo(f"Transcribed {len(segments)} segments.", err=True)
+
+                provider = ClaudeProvider()
+                minutes, seconds = analyzer.find_sermon_start(segments, provider=provider)
 
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)

@@ -38,6 +38,23 @@ def prepare_audio(path: str):
 
 
 @contextmanager
+def extract_window(wav_path: str, start_s: float, end_s: float):
+    """Extract a time window from a WAV file into a temporary WAV file.
+
+    Yields (window_wav_path, actual_start_s) where actual_start_s is the
+    clamped start (>= 0), to be used as the transcription offset.
+    """
+    audio = AudioSegment.from_file(wav_path)
+    actual_start_s = max(0.0, start_s)
+    start_ms = int(actual_start_s * 1000)
+    end_ms = min(len(audio), int(end_s * 1000))
+    with tempfile.TemporaryDirectory() as tmpdir:
+        out = os.path.join(tmpdir, "window.wav")
+        audio[start_ms:end_ms].export(out, format="wav")
+        yield out, actual_start_s
+
+
+@contextmanager
 def split_wav(wav_path: str, segment_s: float = 120.0, overlap_s: float = 30.0):
     """Split a prepared WAV into fixed-duration overlapping segments.
 

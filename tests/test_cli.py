@@ -45,7 +45,7 @@ def test_happy_path_stdout(runner, sample_wav):
     with patch("sermon_finder.cli.audio.prepare_audio", mocks["sermon_finder.audio.prepare_audio"]), \
          patch("sermon_finder.cli.transcriber.transcribe", mocks["sermon_finder.transcriber.transcribe"]), \
          patch("sermon_finder.cli.analyzer.find_sermon_start", mocks["sermon_finder.analyzer.find_sermon_start"]):
-        result = runner.invoke(main, [sample_wav], env={"ANTHROPIC_API_KEY": "test"})
+        result = runner.invoke(main, [sample_wav, "--no-diarize"], env={"ANTHROPIC_API_KEY": "test"})
     assert result.exit_code == 0
     assert "35'42" in result.output
 
@@ -55,7 +55,7 @@ def test_timestamp_format_zero_padded_seconds(runner, sample_wav):
     with patch("sermon_finder.cli.audio.prepare_audio", mocks["sermon_finder.audio.prepare_audio"]), \
          patch("sermon_finder.cli.transcriber.transcribe", mocks["sermon_finder.transcriber.transcribe"]), \
          patch("sermon_finder.cli.analyzer.find_sermon_start", mocks["sermon_finder.analyzer.find_sermon_start"]):
-        result = runner.invoke(main, [sample_wav], env={"ANTHROPIC_API_KEY": "test"})
+        result = runner.invoke(main, [sample_wav, "--no-diarize"], env={"ANTHROPIC_API_KEY": "test"})
     assert "12'05" in result.output
 
 
@@ -66,6 +66,6 @@ def test_sermon_not_found_exits_with_error(runner, sample_wav):
     with patch("sermon_finder.cli.audio.prepare_audio", return_value=cm), \
          patch("sermon_finder.cli.transcriber.transcribe", return_value=[]), \
          patch("sermon_finder.cli.analyzer.find_sermon_start", side_effect=ValueError("Could not find")):
-        result = runner.invoke(main, [sample_wav], env={"ANTHROPIC_API_KEY": "test"})
+        result = runner.invoke(main, [sample_wav, "--no-diarize"], env={"ANTHROPIC_API_KEY": "test"})
     assert result.exit_code == 1
     assert "Could not find" in result.output

@@ -10,7 +10,7 @@ from sermon_finder.audio import split_wav
 _MODEL_RAM_GB = {"tiny": 1, "base": 1, "small": 2, "medium": 5, "large-v3": 10}
 
 
-def _transcribe_segment(
+def transcribe_segment(
     wav_path: str,
     offset_s: float,
     keep_until_s: float | None,
@@ -73,7 +73,7 @@ def transcribe(
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = [
                 executor.submit(
-                    _transcribe_segment, path, offset, keep_until, model_size, thread_local
+                    transcribe_segment, path, offset, keep_until, model_size, thread_local
                 )
                 for path, offset, keep_until in chunks
             ]
