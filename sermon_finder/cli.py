@@ -18,6 +18,17 @@ from sermon_finder.analyzer import ClaudeProvider
 
 _console = Console(stderr=True)
 
+_WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
+
+
+def _next_model(current: str) -> str | None:
+    """Return the next larger Whisper model, or None if already at the largest."""
+    try:
+        idx = _WHISPER_MODELS.index(current)
+    except ValueError:
+        return None
+    return _WHISPER_MODELS[idx + 1] if idx + 1 < len(_WHISPER_MODELS) else None
+
 
 def _ts(s: float) -> str:
     """Format a timestamp in seconds as m:ss (e.g. 63 → '1:03')."""
@@ -35,6 +46,7 @@ class _StatusBar:
     phase: str = "diarizing"      # "diarizing" | "transcribing" | "validating"
     transition: int = 0
     total_transitions: int = 0
+    current_model: str = ""
     _spinner: Spinner = field(
         default_factory=lambda: Spinner("dots", style="bold green"),
         repr=False,
@@ -53,7 +65,8 @@ class _StatusBar:
         elif self.phase == "transcribing":
             row.append("transcribing", style="bold cyan")
             row.append(
-                f"  —  transition {self.transition}/{self.total_transitions}",
+                f"  —  transition {self.transition}/{self.total_transitions}"
+                + (f"  [{self.current_model}]" if self.current_model else ""),
                 style="dim cyan",
             )
         elif self.phase == "validating":
@@ -80,12 +93,23 @@ class _StatusBar:
     ),
 )
 @click.option(
+    "--retry-model",
+    default=None,
+    metavar="SIZE",
+    help=(
+        "Enable quality-triggered retries up to this Whisper model size. "
+        "When the LLM reports a poor-quality transcript and returns NO, "
+        "the tool re-transcribes with successively larger models until this cap. "
+        "Choices: tiny, base, small, medium, large-v3."
+    ),
+)
+@click.option(
     "--verbose", "-v",
     is_flag=True,
     help="Print each transcribed segment as it is produced (useful for debugging).",
 )
 @click.version_option(version="0.1.0")
-def main(audio_file: str, model: str, verbose: bool) -> None:
+def main(audio_file: str, model: str, retry_model: str | None, verbose: bool) -> None:
     """Find the timestamp when the sermon begins in a church service recording.
 
     AUDIO_FILE is the path to the audio file (MP3, WAV, M4A, …).
@@ -116,6 +140,15 @@ def main(audio_file: str, model: str, verbose: bool) -> None:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         click.echo("Error: ANTHROPIC_API_KEY environment variable is not set.", err=True)
         sys.exit(1)
+
+    if retry_model is not None and retry_model not in _WHISPER_MODELS:
+        click.echo(
+            f"Error: invalid --retry-model '{retry_model}'. "
+            f"Choices: {', '.join(_WHISPER_MODELS)}",
+            err=True,
+        )
+        sys.exit(1)
+    retry_cap_idx = _WHISPER_MODELS.index(retry_model) if retry_model is not None else -1
 
     try:
         audio.validate_audio_file(audio_file)
@@ -158,35 +191,63 @@ def main(audio_file: str, model: str, verbose: bool) -> None:
                             continue
 
                         for j, t in enumerate(transitions, 1):
-                            status.phase = "transcribing"
-                            status.transition = j
-                            status.total_transitions = len(transitions)
+                            current_model = model
+                            models_tried: list[str] = []
 
-                            with audio.extract_window(wav_path, t - 30.0, t + 60.0) as (win_path, win_start):
-                                segs = transcriber.transcribe_segment(
-                                    win_path, win_start, keep_until_s=None,
-                                    model_size=model, thread_local=thread_local,
-                                )
+                            while True:
+                                status.phase = "transcribing"
+                                status.transition = j
+                                status.total_transitions = len(transitions)
+                                status.current_model = current_model
 
-                            if verbose:
-                                for seg in segs:
-                                    _console.print(
-                                        f"    [dim][{_ts(seg['start'])}] {seg['text']}[/dim]"
+                                with audio.extract_window(wav_path, t - 30.0, t + 60.0) as (win_path, win_start):
+                                    segs = transcriber.transcribe_segment(
+                                        win_path, win_start, keep_until_s=None,
+                                        model_size=current_model, thread_local=thread_local,
                                     )
 
-                            status.phase = "validating"
+                                models_tried.append(current_model)
 
-                            if analyzer.is_sermon_transition(segs, provider=provider):
+                                if verbose:
+                                    for seg in segs:
+                                        _console.print(
+                                            f"    [dim][{_ts(seg['start'])}] {seg['text']}[/dim]"
+                                        )
+
+                                status.phase = "validating"
+                                result = analyzer.is_sermon_transition(
+                                    segs, transition_t=t, provider=provider
+                                )
+
+                                # Quality-triggered retry: poor transcript + negative decision
+                                # → step up to the next larger model and retry, up to
+                                # --retry-model cap. A YES with poor quality is accepted as-is.
+                                if not result.quality_ok and not result.is_sermon:
+                                    next_m = _next_model(current_model)
+                                    if next_m and _WHISPER_MODELS.index(next_m) <= retry_cap_idx:
+                                        current_model = next_m
+                                        continue
+
+                                break
+
+                            model_chain = " → ".join(models_tried)
+                            entry = f"Segment {i} — transition {j}/{len(transitions)} at {_ts(t)}  {model_chain}"
+
+                            if result.is_sermon:
                                 found = (int(t) // 60, int(t) % 60)
+                                _console.print(f"  {entry} → [bold green]confirmed[/bold green]")
                                 _console.print(
                                     f"[bold green]Sermon start found at {_ts(t)}[/bold green]"
                                 )
                                 break
                             else:
-                                _console.print(
-                                    f"  [yellow]Segment {i} — transition {j}/{len(transitions)}"
-                                    f" at {_ts(t)} discarded by LLM[/yellow]"
-                                )
+                                if result.uncertain:
+                                    outcome = "rejected [dim](uncertain)[/dim]"
+                                elif not result.quality_ok:
+                                    outcome = "rejected [dim](poor quality)[/dim]"
+                                else:
+                                    outcome = "rejected"
+                                _console.print(f"  [yellow]{entry} → {outcome}[/yellow]")
 
                         if found:
                             break

@@ -43,11 +43,13 @@ Usage: sermon-finder [OPTIONS] AUDIO_FILE
   Find the timestamp when the sermon begins in a church service recording.
 
 Options:
-  --model SIZE    Whisper model for transcription. [default: small]
-                  Choices: tiny, base, small, medium, large-v3.
-  -v, --verbose   Print each transcribed segment (useful for debugging).
-  --version       Show the version and exit.
-  -h, --help      Show this message and exit.
+  --model SIZE         Whisper model for transcription. [default: small]
+                       Choices: tiny, base, small, medium, large-v3.
+  --retry-model SIZE   Enable quality-triggered retries up to this model size.
+                       Choices: tiny, base, small, medium, large-v3.
+  -v, --verbose        Print each transcribed segment (useful for debugging).
+  --version            Show the version and exit.
+  -h, --help           Show this message and exit.
 ```
 
 ### Basic usage
@@ -96,6 +98,20 @@ The `--model` option controls the Whisper model used to transcribe the short win
 
 > **Note:** On first run the chosen model is downloaded from HuggingFace (~500 MB for `small`). Subsequent runs use the cached model.
 
+### Quality-triggered retries
+
+When Claude determines that the transcript quality is too poor to make a reliable decision, the tool can automatically re-transcribe using a larger Whisper model. Use `--retry-model` to enable this and set the ceiling:
+
+```bash
+# Retry with medium if small produces a poor-quality transcript
+poetry run sermon-finder service.mp3 --retry-model medium
+
+# Step through small → medium → large-v3 until quality is acceptable
+poetry run sermon-finder service.mp3 --retry-model large-v3
+```
+
+Without `--retry-model`, poor-quality transcripts are accepted as-is and the transition is discarded if Claude returns NO. Retries only happen when quality is poor **and** Claude's answer is NO — a YES is always accepted regardless of quality.
+
 ### Verbose mode
 
 Print each transcribed segment for debugging:
@@ -112,7 +128,7 @@ poetry run sermon-finder service.mp3 --verbose
 
 3. **Transcription** — For each detected speaker transition at time *t*, a short window around *t* is extracted and transcribed with `faster-whisper`. Only these short clips are transcribed — not the full recording.
 
-4. **LLM validation** — The transcript is sent to Claude (`claude-sonnet-4-5`) with a prompt describing the typical structure of a French Protestant service. Claude answers YES or NO: is this transition the moment the preacher begins the sermon?
+4. **LLM validation** — The transcript is sent to Claude (`claude-sonnet-4-5`) with a prompt describing the typical structure of a French Protestant service. Claude returns a decision (YES / NO / UNSURE) and a quality assessment (GOOD / POOR). If quality is POOR and the decision is NO, the tool can re-transcribe with a larger model (see `--retry-model`).
 
 5. **Early exit** — The tool processes segments in chronological order and stops as soon as a transition is confirmed, keeping both compute and API costs low.
 

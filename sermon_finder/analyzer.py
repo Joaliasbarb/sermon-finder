@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import anthropic
@@ -28,9 +29,26 @@ How the preacher typically begins (any combination is possible):
 Key signal: after this transition the new speaker holds the floor in a sustained,
 substantive way as the preacher — not merely for a short reading or a liturgical element.
 
-Answer with exactly YES if this transition is the start of the sermon,
-or NO if it is any other speaker change within the liturgy.\
+Respond with exactly two lines:
+DECISION: YES | NO | UNSURE
+QUALITY: GOOD | POOR
+
+DECISION values:
+  YES    — this transition is the sermon start
+  NO     — this is a different speaker change within the liturgy
+  UNSURE — the transcript does not give enough context to decide
+
+QUALITY values:
+  GOOD — the transcript is legible enough to make a reliable determination
+  POOR — the transcript is too garbled, fragmented, or incomplete to be reliable\
 """
+
+
+@dataclass
+class TransitionResult:
+    is_sermon: bool   # True for YES; False for NO or UNSURE
+    uncertain: bool   # True when DECISION is UNSURE
+    quality_ok: bool  # True for GOOD; False for POOR
 
 
 @runtime_checkable
@@ -45,7 +63,7 @@ class ClaudeProvider:
     def complete(self, system: str, user: str) -> str:
         response = self._client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=20,
+            max_tokens=50,
             system=system,
             messages=[{"role": "user", "content": user}],
         )
@@ -54,19 +72,36 @@ class ClaudeProvider:
 
 def is_sermon_transition(
     segments: list[dict],
+    transition_t: float | None = None,
     provider: LLMProvider | None = None,
-) -> bool:
-    """Return True if the transcript around a speaker transition is the sermon start."""
+) -> TransitionResult:
+    """Return a TransitionResult for the transcript around a speaker transition."""
     if provider is None:
         provider = ClaudeProvider()
-    transcript = _format_chunk(segments)
+    transcript = _format_chunk(segments, transition_t)
     user_msg = (
         "Here is the transcript around a detected speaker transition. "
         "Is this the start of the sermon (prédication)?\n\n"
         + transcript
     )
     response = provider.complete(TRANSITION_SYSTEM_PROMPT, user_msg)
-    return response.strip().upper().startswith("YES")
+    return _parse_result(response)
+
+
+def _parse_result(response: str) -> TransitionResult:
+    decision = "NO"
+    quality = "GOOD"
+    for line in response.strip().splitlines():
+        upper = line.strip().upper()
+        if upper.startswith("DECISION:"):
+            decision = upper.split(":", 1)[1].strip()
+        elif upper.startswith("QUALITY:"):
+            quality = upper.split(":", 1)[1].strip()
+    return TransitionResult(
+        is_sermon=(decision == "YES"),
+        uncertain=(decision == "UNSURE"),
+        quality_ok=(quality != "POOR"),
+    )
 
 
 def _format_timestamp(seconds: float) -> str:
@@ -75,8 +110,12 @@ def _format_timestamp(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
-def _format_chunk(segments: list[dict]) -> str:
-    return "\n".join(
-        f"[{_format_timestamp(seg['start'])}] {seg['text']}"
-        for seg in segments
-    )
+def _format_chunk(segments: list[dict], transition_t: float | None = None) -> str:
+    lines = []
+    marker_done = False
+    for seg in segments:
+        if transition_t is not None and not marker_done and seg["start"] >= transition_t:
+            lines.append(f"--- transition at {_format_timestamp(transition_t)} ---")
+            marker_done = True
+        lines.append(f"[{_format_timestamp(seg['start'])}] {seg['text']}")
+    return "\n".join(lines)
