@@ -225,6 +225,12 @@ def main(
                         seg_q.put((chunk_path, offset_s, keep_until_s, i, len(chunks)))
                     seg_q.put(None)
 
+                    # log_q: worker threads enqueue pre-formatted rich markup strings;
+                    # the main thread drains and prints them. This avoids calling
+                    # _console.print() from background threads while Live holds its
+                    # internal lock, which can deadlock.
+                    log_q: queue.Queue = queue.Queue()
+
                     # --- status + log callbacks ---
 
                     def on_segment_start(seg_idx, total_segs, off_s, end_s):
@@ -234,7 +240,7 @@ def main(
                         status.phase = "diarizing"
 
                     def on_no_transitions(seg_idx, total_segs, off_s, end_s):
-                        _console.print(
+                        log_q.put(
                             f"  [dim]Segment {seg_idx}/{total_segs}"
                             f" [{_ts(off_s)} – {_ts(end_s)}]"
                             f"  no transitions — skipped[/dim]"
@@ -254,7 +260,7 @@ def main(
                     def on_result(t, result, models_tried, segments, trans_idx, total_trans, seg_idx):
                         if verbose:
                             for seg in segments:
-                                _console.print(
+                                log_q.put(
                                     f"    [dim][{_ts(seg['start'])}] {seg['text']}[/dim]"
                                 )
                         model_chain = " → ".join(models_tried)
@@ -264,8 +270,8 @@ def main(
                         )
                         if result.is_sermon:
                             status.found_at_s = t
-                            _console.print(f"  {entry} → [bold green]confirmed[/bold green]")
-                            _console.print(
+                            log_q.put(f"  {entry} → [bold green]confirmed[/bold green]")
+                            log_q.put(
                                 f"[bold green]Sermon start found at {_ts(t)}[/bold green]"
                             )
                         else:
@@ -275,7 +281,7 @@ def main(
                                 outcome = "rejected [dim](poor quality)[/dim]"
                             else:
                                 outcome = "rejected"
-                            _console.print(f"  [yellow]{entry} → {outcome}[/yellow]")
+                            log_q.put(f"  [yellow]{entry} → {outcome}[/yellow]")
 
                     def retranscribe(t, m_size):
                         with audio.extract_window(wav_path, t - 30.0, t + 30.0) as (wp, ws):
@@ -317,15 +323,21 @@ def main(
                         on_result=on_result,
                     )
 
+                    def _drain_log():
+                        while True:
+                            try:
+                                _console.print(log_q.get_nowait())
+                            except queue.Empty:
+                                break
+
                     threads = [t_diarizer, t_transcriber, t_validator]
                     try:
-                        for t in threads:
-                            while t.is_alive():
-                                t.join(timeout=0.5)
+                        while any(t.is_alive() for t in threads):
+                            _drain_log()
+                            time.sleep(0.1)
+                        _drain_log()
                     except KeyboardInterrupt:
                         found.set()
-                        for t in threads:
-                            t.join(timeout=2.0)
                         raise
 
             if thread_errors:
