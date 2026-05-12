@@ -338,7 +338,14 @@ def main(
                         _drain_log()
                     except KeyboardInterrupt:
                         found.set()
-                        raise
+                        # os._exit bypasses Python GC so the ML library's C++
+                        # threads don't crash with std::terminate() during shutdown.
+                        if ollama:
+                            try:
+                                provider.teardown()
+                            except Exception:
+                                pass
+                        os._exit(130)
 
             if thread_errors:
                 raise thread_errors[0]
