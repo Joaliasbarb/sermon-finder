@@ -37,7 +37,10 @@ def diarizer_worker(
             transition_queue.put(None)
             return
 
-        item = segment_queue.get()
+        try:
+            item = segment_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
         if item is None:
             transition_queue.put(None)
             return

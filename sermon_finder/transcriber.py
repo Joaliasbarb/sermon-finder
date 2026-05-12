@@ -33,7 +33,10 @@ def transcriber_worker(
             transcription_queue.put(None)
             return
 
-        item = transition_queue.get()
+        try:
+            item = transition_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
         if item is None:
             transcription_queue.put(None)
             return

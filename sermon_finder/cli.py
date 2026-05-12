@@ -317,8 +317,16 @@ def main(
                         on_result=on_result,
                     )
 
-                    for t in [t_diarizer, t_transcriber, t_validator]:
-                        t.join()
+                    threads = [t_diarizer, t_transcriber, t_validator]
+                    try:
+                        for t in threads:
+                            while t.is_alive():
+                                t.join(timeout=0.5)
+                    except KeyboardInterrupt:
+                        found.set()
+                        for t in threads:
+                            t.join(timeout=2.0)
+                        raise
 
             if thread_errors:
                 raise thread_errors[0]

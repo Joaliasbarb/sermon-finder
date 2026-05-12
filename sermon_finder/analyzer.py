@@ -210,7 +210,10 @@ def validator_worker(
     while True:
         if found.is_set():  # V14
             return
-        item = transcription_queue.get()
+        try:
+            item = transcription_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
         if item is None:  # V15 — terminal stage, no next queue to forward to
             return
         t, segments, model_size, seg_idx, trans_idx, total_trans, offset_s, seg_end_s = item
