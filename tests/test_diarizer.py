@@ -1,6 +1,8 @@
+import queue
+import threading
 from unittest.mock import MagicMock, patch
 
-from sermon_finder.diarizer import get_speaker_transitions, run_diarization
+from sermon_finder.diarizer import diarizer_worker, get_speaker_transitions, run_diarization
 
 
 def _seg(speaker: str, start: float, end: float) -> dict:
@@ -76,3 +78,88 @@ def test_run_diarization_no_forced_speaker_count():
         run_diarization("chunk.wav")
 
     mock_fn.assert_called_once_with("chunk.wav")
+
+
+# --- diarizer_worker tests ---
+
+def _run_worker(seg_items, transitions_per_segment, found=None):
+    """Helper: fill segment_queue, run worker, return all transition_queue items."""
+    seg_q = queue.Queue()
+    trans_q = queue.Queue()
+    found = found or threading.Event()
+
+    for item in seg_items:
+        seg_q.put(item)
+    seg_q.put(None)  # sentinel
+
+    side_effects = []
+    for transitions in transitions_per_segment:
+        mock_segs = [{"speaker": "A", "start": 0.0, "end": 1.0}]
+        side_effects.append(mock_segs)
+
+    with patch("sermon_finder.diarizer.run_diarization", side_effect=side_effects), \
+         patch("sermon_finder.diarizer.get_speaker_transitions", side_effect=transitions_per_segment):
+        diarizer_worker(seg_q, trans_q, found)
+
+    items = []
+    while not trans_q.empty():
+        items.append(trans_q.get_nowait())
+    return items
+
+
+def test_diarizer_worker_forwards_sentinel_immediately():
+    seg_q = queue.Queue()
+    trans_q = queue.Queue()
+    seg_q.put(None)
+    diarizer_worker(seg_q, trans_q, threading.Event())
+    assert trans_q.get_nowait() is None
+    assert trans_q.empty()
+
+
+def test_diarizer_worker_pushes_transitions():
+    seg = ("/tmp/c.wav", 0.0, None, 1, 1)
+    items = _run_worker([seg], [[10.0, 20.0]])
+    transitions = [i for i in items if i is not None]
+    assert len(transitions) == 2
+    assert transitions[0][0] == 10.0   # t
+    assert transitions[0][1] == 1      # segment_idx
+    assert transitions[0][2] == 1      # transition_idx
+    assert transitions[0][3] == 2      # total_transitions
+    assert transitions[1][0] == 20.0
+    assert transitions[1][2] == 2
+    assert items[-1] is None           # sentinel last
+
+
+def test_diarizer_worker_skips_empty_segment():
+    seg = ("/tmp/c.wav", 0.0, None, 1, 1)
+    items = _run_worker([seg], [[]])
+    assert items == [None]             # only sentinel, no transitions
+
+
+def test_diarizer_worker_stops_on_found_event():
+    found = threading.Event()
+    found.set()
+    seg_q = queue.Queue()
+    trans_q = queue.Queue()
+    seg_q.put(("/tmp/c.wav", 0.0, None, 1, 1))
+    seg_q.put(None)
+    with patch("sermon_finder.diarizer.run_diarization") as mock_diarize:
+        diarizer_worker(seg_q, trans_q, found)
+    mock_diarize.assert_not_called()
+    assert trans_q.get_nowait() is None
+
+
+def test_diarizer_worker_seg_end_s_last_segment():
+    """Last segment (keep_until_s=None) uses offset_s + 240 for seg_end_s."""
+    seg = ("/tmp/c.wav", 60.0, None, 1, 1)
+    items = _run_worker([seg], [[90.0]])
+    t, seg_idx, t_idx, total, offset_s, seg_end_s = items[0]
+    assert seg_end_s == 60.0 + 240.0
+
+
+def test_diarizer_worker_seg_end_s_non_last_segment():
+    """Non-last segment uses keep_until_s + 30 for seg_end_s."""
+    seg = ("/tmp/c.wav", 0.0, 210.0, 1, 2)
+    items = _run_worker([seg], [[90.0]])
+    t, seg_idx, t_idx, total, offset_s, seg_end_s = items[0]
+    assert seg_end_s == 210.0 + 30.0
