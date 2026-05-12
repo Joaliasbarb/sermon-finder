@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 import anthropic
+import httpx
 
 CLAUDE_MODEL = "claude-sonnet-4-5"
 
@@ -68,6 +69,67 @@ class ClaudeProvider:
             messages=[{"role": "user", "content": user}],
         )
         return response.content[0].text.strip()
+
+
+OLLAMA_DEFAULT_MODEL = "mistral"
+OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434"
+
+
+class OllamaProvider:
+    def __init__(
+        self,
+        model: str = OLLAMA_DEFAULT_MODEL,
+        base_url: str = OLLAMA_DEFAULT_BASE_URL,
+    ):
+        self._model = model
+        self._base_url = base_url.rstrip("/")
+
+    def teardown(self) -> None:
+        """Unload the model from ollama RAM. Swallows errors — best effort only."""
+        try:
+            httpx.post(
+                f"{self._base_url}/api/chat",
+                json={
+                    "model": self._model,
+                    "messages": [{"role": "user", "content": " "}],
+                    "stream": False,
+                    "keep_alive": 0,
+                },
+                timeout=10.0,
+            )
+        except Exception:
+            pass
+
+    def warm_up(self) -> None:
+        """Send a minimal request to load the model into RAM. Blocks until ready."""
+        httpx.post(
+            f"{self._base_url}/api/chat",
+            json={
+                "model": self._model,
+                "messages": [{"role": "user", "content": " "}],
+                "stream": False,
+                "keep_alive": -1,
+                "options": {"num_predict": 1},
+            },
+            timeout=300.0,
+        ).raise_for_status()
+
+    def complete(self, system: str, user: str) -> str:
+        response = httpx.post(
+            f"{self._base_url}/api/chat",
+            json={
+                "model": self._model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "stream": False,
+                "keep_alive": -1,
+            },
+            timeout=300.0,
+        )
+        response.raise_for_status()
+        return response.json()["message"]["content"].strip()
 
 
 def is_sermon_transition(

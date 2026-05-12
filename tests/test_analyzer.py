@@ -1,8 +1,11 @@
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import httpx
 
 from sermon_finder.analyzer import (
     ClaudeProvider,
+    OllamaProvider,
     TransitionResult,
     _format_chunk,
     _format_timestamp,
@@ -113,3 +116,72 @@ def test_is_sermon_transition_uses_correct_prompts():
     assert "YES" in system and "NO" in system and "UNSURE" in system
     assert "Bonjour frères" in user
     assert "transition at 01:02" in user
+
+
+# --- OllamaProvider tests ---
+
+def test_ollama_provider_sends_correct_request():
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"message": {"content": " DECISION: YES\nQUALITY: GOOD "}}
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("sermon_finder.analyzer.httpx.post", return_value=mock_response) as mock_post:
+        provider = OllamaProvider(model="mistral", base_url="http://localhost:11434")
+        result = provider.complete("sys prompt", "user prompt")
+
+    assert result == "DECISION: YES\nQUALITY: GOOD"
+    call_kwargs = mock_post.call_args
+    assert call_kwargs[0][0] == "http://localhost:11434/api/chat"
+    body = call_kwargs[1]["json"]
+    assert body["model"] == "mistral"
+    assert body["stream"] is False
+    assert body["keep_alive"] == -1
+    assert body["messages"][0] == {"role": "system", "content": "sys prompt"}
+    assert body["messages"][1] == {"role": "user", "content": "user prompt"}
+
+
+def test_ollama_provider_warm_up_sends_keep_alive():
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("sermon_finder.analyzer.httpx.post", return_value=mock_response) as mock_post:
+        provider = OllamaProvider(model="mistral", base_url="http://localhost:11434")
+        provider.warm_up()
+
+    body = mock_post.call_args[1]["json"]
+    assert body["keep_alive"] == -1
+    assert body["stream"] is False
+    assert body["model"] == "mistral"
+    assert len(body["messages"]) == 1
+
+
+def test_ollama_provider_parses_response():
+    mock_response = MagicMock()
+    mock_response.json.return_value = {"message": {"content": "DECISION: NO\nQUALITY: POOR"}}
+    mock_response.raise_for_status = MagicMock()
+
+    with patch("sermon_finder.analyzer.httpx.post", return_value=mock_response):
+        provider = OllamaProvider()
+        result = provider.complete("s", "u")
+
+    assert result == "DECISION: NO\nQUALITY: POOR"
+
+
+def test_ollama_provider_teardown_sends_keep_alive_zero():
+    mock_response = MagicMock()
+    with patch("sermon_finder.analyzer.httpx.post", return_value=mock_response) as mock_post:
+        OllamaProvider().teardown()
+    body = mock_post.call_args[1]["json"]
+    assert body["keep_alive"] == 0
+
+
+def test_ollama_provider_teardown_swallows_errors():
+    with patch("sermon_finder.analyzer.httpx.post", side_effect=httpx.ConnectError("refused")):
+        OllamaProvider().teardown()  # must not raise
+
+
+def test_ollama_provider_connection_error_raises():
+    with patch("sermon_finder.analyzer.httpx.post", side_effect=httpx.ConnectError("refused")):
+        provider = OllamaProvider()
+        with pytest.raises(httpx.ConnectError):
+            provider.complete("s", "u")

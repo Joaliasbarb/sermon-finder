@@ -14,7 +14,7 @@ from rich.text import Text
 load_dotenv()
 
 from sermon_finder import audio, transcriber, analyzer, diarizer as _diarizer
-from sermon_finder.analyzer import ClaudeProvider
+from sermon_finder.analyzer import ClaudeProvider, OllamaProvider
 
 _console = Console(stderr=True)
 
@@ -39,7 +39,7 @@ def _ts(s: float) -> str:
 class _StatusBar:
     """Live status bar rendered at the bottom of the terminal."""
 
-    total: int = 1
+    total: int = 0
     segment: int = 1
     seg_start_s: float = 0.0
     seg_end_s: float = 0.0
@@ -47,6 +47,7 @@ class _StatusBar:
     transition: int = 0
     total_transitions: int = 0
     current_model: str = ""
+    llm_ready: bool = True
     _spinner: Spinner = field(
         default_factory=lambda: Spinner("dots", style="bold green"),
         repr=False,
@@ -56,25 +57,35 @@ class _StatusBar:
     def __rich_console__(self, console, options):
         row = Text()
         row.append_text(self._spinner.render(time.time()))
-        row.append(f"  Segment {self.segment}/{self.total}", style="bold white")
-        row.append(f"  [{_ts(self.seg_start_s)} – {_ts(self.seg_end_s)}]", style="dim")
-        row.append("    ")
 
-        if self.phase == "diarizing":
-            row.append("diarizing", style="bold yellow")
-        elif self.phase == "transcribing":
-            row.append("transcribing", style="bold cyan")
-            row.append(
-                f"  —  transition {self.transition}/{self.total_transitions}"
-                + (f"  [{self.current_model}]" if self.current_model else ""),
-                style="dim cyan",
-            )
-        elif self.phase == "validating":
-            row.append("validating with LLM", style="bold magenta")
-            row.append(
-                f"  —  transition {self.transition}/{self.total_transitions}",
-                style="dim magenta",
-            )
+        if self.total == 0:
+            row.append("  initializing...", style="dim")
+        else:
+            row.append(f"  Segment {self.segment}/{self.total}", style="bold white")
+            row.append(f"  [{_ts(self.seg_start_s)} – {_ts(self.seg_end_s)}]", style="dim")
+            row.append("    ")
+
+            if self.phase == "diarizing":
+                row.append("diarizing", style="bold yellow")
+            elif self.phase == "transcribing":
+                row.append("transcribing", style="bold cyan")
+                row.append(
+                    f"  —  transition {self.transition}/{self.total_transitions}"
+                    + (f"  [{self.current_model}]" if self.current_model else ""),
+                    style="dim cyan",
+                )
+            elif self.phase == "validating":
+                row.append("validating with LLM", style="bold magenta")
+                row.append(
+                    f"  —  transition {self.transition}/{self.total_transitions}",
+                    style="dim magenta",
+                )
+
+        row.append("    ")
+        if self.llm_ready:
+            row.append("LLM: ready", style="dim green")
+        else:
+            row.append("LLM: loading...", style="dim yellow")
 
         yield row
 
@@ -108,8 +119,28 @@ class _StatusBar:
     is_flag=True,
     help="Print each transcribed segment as it is produced (useful for debugging).",
 )
+@click.option(
+    "--ollama",
+    is_flag=True,
+    default=False,
+    help="Use a local ollama model instead of the Claude API.",
+)
+@click.option(
+    "--ollama-model",
+    default="mistral",
+    show_default=True,
+    metavar="NAME",
+    help="Ollama model name to use when --ollama is set.",
+)
 @click.version_option(version="0.1.0")
-def main(audio_file: str, model: str, retry_model: str | None, verbose: bool) -> None:
+def main(
+    audio_file: str,
+    model: str,
+    retry_model: str | None,
+    verbose: bool,
+    ollama: bool,
+    ollama_model: str,
+) -> None:
     """Find the timestamp when the sermon begins in a church service recording.
 
     AUDIO_FILE is the path to the audio file (MP3, WAV, M4A, …).
@@ -137,7 +168,7 @@ def main(audio_file: str, model: str, retry_model: str | None, verbose: bool) ->
       sermon-finder service.mp3 --verbose
       sermon-finder service.mp3 | xargs echo "Sermon starts at:"
     """
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not ollama and not os.environ.get("ANTHROPIC_API_KEY"):
         click.echo("Error: ANTHROPIC_API_KEY environment variable is not set.", err=True)
         sys.exit(1)
 
@@ -156,18 +187,29 @@ def main(audio_file: str, model: str, retry_model: str | None, verbose: bool) ->
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
+    provider = OllamaProvider(model=ollama_model) if ollama else ClaudeProvider()
     try:
         _console.print("Preparing audio...", style="dim")
 
         with audio.prepare_audio(audio_file) as wav_path:
             thread_local = threading.local()
             found: tuple[int, int] | None = None
-            provider = ClaudeProvider()
 
-            with audio.split_wav(wav_path, segment_s=240.0, overlap_s=30.0) as chunks:
-                status = _StatusBar(total=len(chunks))
+            model_ready = threading.Event()
+            status = _StatusBar(llm_ready=not ollama)
 
-                with Live(status, console=_console, refresh_per_second=8):
+            with Live(status, console=_console, refresh_per_second=8):
+                if ollama:
+                    def _load_model():
+                        provider.warm_up()
+                        model_ready.set()
+                        status.llm_ready = True
+                    threading.Thread(target=_load_model, daemon=True, name="model-loader").start()
+                else:
+                    model_ready.set()
+
+                with audio.split_wav(wav_path, segment_s=240.0, overlap_s=30.0) as chunks:
+                    status.total = len(chunks)
                     for i, (chunk_path, offset_s, keep_until_s) in enumerate(chunks, 1):
                         seg_end_s = (
                             keep_until_s + 30.0
@@ -269,5 +311,8 @@ def main(audio_file: str, model: str, retry_model: str | None, verbose: bool) ->
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+    finally:
+        if ollama:
+            provider.teardown()
 
     click.echo(f"{minutes}'{seconds:02d}")
