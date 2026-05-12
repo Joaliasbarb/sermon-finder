@@ -22,7 +22,7 @@ Find sermon-start timestamp in French Protestant church service audio. Output `m
 - CLI: `sermon-finder AUDIO_FILE [--model SIZE] [--retry-model SIZE] [-v/--verbose] [--ollama] [--ollama-model NAME]`
 - Config: `ANTHROPIC_API_KEY` env var or `.env` (loaded via python-dotenv)
 - Claude API: `claude-sonnet-4-5` via `anthropic` SDK; `max_tokens=50`
-- Ollama API: `POST /api/chat` at `localhost:11434`; `keep_alive=-1`; timeout 120s
+- Ollama API: `POST /api/chat` at `localhost:11434`; `keep_alive=-1`; timeout 300s
 - Diarize: `diarize` lib (CPU-local, no API key)
 - Transcribe: `faster-whisper` with `language="fr"`, `vad_filter=True`
 - Audio I/O: `pydub` + ffmpeg; accepted: `.mp3 .wav .m4a .aac .ogg .flac`
@@ -63,11 +63,11 @@ Find sermon-start timestamp in French Protestant church service audio. Output `m
 | T5  | .      |            | Merge diarization transitions < N seconds apart before LLM validation | V4 |
 | T6  | x      |            | Add `OllamaProvider` implementing `LLMProvider` protocol; call local ollama REST API (`localhost:11434`) as drop-in replacement for `ClaudeProvider` | I.Claude |
 | T7  | x      | pipeline   | Add `model_ready` Event in `cli.py`; for Claude set it immediately after audio validation; for ollama spawn loader thread calling `OllamaProvider.warm_up()` then set event; `complete()` sends `keep_alive=-1`; status bar shows "loading" or "ready" LLM state | V11,V13 |
-| T8  | .      | pipeline   | Refactor diarizer into worker thread: consume `segment_queue`, push transitions to `transition_queue`, forward sentinel on done | V14,V15 |
-| T9  | .      | pipeline   | Add transcriber worker thread: consume `transition_queue` in order, push `(t, segments)` to `transcription_queue`, forward sentinel on done | V12,V14,V15 |
-| T10 | .      | pipeline   | Add validator worker thread: wait on `model_ready`, consume `transcription_queue` in order, set `found` Event on YES, forward sentinel on done | V8,V13,V14,V15 |
-| T11 | .      | pipeline   | Update `_StatusBar` to reflect pipeline state: model loading, active phase per worker, early-exit confirmation | V2,V11 |
-| T12 | .      | pipeline   | Wire T7–T11 into `cli.py`: replace sequential loop with pipeline; join all threads; propagate exceptions across threads to main | V3,V14 |
+| T8  | x      | pipeline   | Refactor diarizer into worker thread: consume `segment_queue`, push transitions to `transition_queue`, forward sentinel on done | V14,V15 |
+| T9  | x      | pipeline   | Add transcriber worker thread: consume `transition_queue` in order, push `(t, segments)` to `transcription_queue`, forward sentinel on done | V12,V14,V15 |
+| T10 | x      | pipeline   | Add validator worker thread: wait on `model_ready`, consume `transcription_queue` in order, set `found` Event on YES, forward sentinel on done | V8,V13,V14,V15 |
+| T11 | x      | pipeline   | Update `_StatusBar` to reflect pipeline state: model loading, active phase per worker, early-exit confirmation | V2,V11 |
+| T12 | x      | pipeline   | Wire T7–T11 into `cli.py`: replace sequential loop with pipeline; join all threads; propagate exceptions across threads to main | V3,V14 |
 
 ---
 

@@ -1,4 +1,5 @@
 import os
+import queue
 import sys
 import threading
 import time
@@ -14,20 +15,9 @@ from rich.text import Text
 load_dotenv()
 
 from sermon_finder import audio, transcriber, analyzer, diarizer as _diarizer
-from sermon_finder.analyzer import ClaudeProvider, OllamaProvider
+from sermon_finder.analyzer import ClaudeProvider, OllamaProvider, WHISPER_MODELS
 
 _console = Console(stderr=True)
-
-_WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v3"]
-
-
-def _next_model(current: str) -> str | None:
-    """Return the next larger Whisper model, or None if already at the largest."""
-    try:
-        idx = _WHISPER_MODELS.index(current)
-    except ValueError:
-        return None
-    return _WHISPER_MODELS[idx + 1] if idx + 1 < len(_WHISPER_MODELS) else None
 
 
 def _ts(s: float) -> str:
@@ -48,6 +38,7 @@ class _StatusBar:
     total_transitions: int = 0
     current_model: str = ""
     llm_ready: bool = True
+    found_at_s: float | None = None
     _spinner: Spinner = field(
         default_factory=lambda: Spinner("dots", style="bold green"),
         repr=False,
@@ -57,6 +48,11 @@ class _StatusBar:
     def __rich_console__(self, console, options):
         row = Text()
         row.append_text(self._spinner.render(time.time()))
+
+        if self.found_at_s is not None:
+            row.append(f"  Sermon confirmed at {_ts(self.found_at_s)}", style="bold green")
+            yield row
+            return
 
         if self.total == 0:
             row.append("  initializing...", style="dim")
@@ -172,14 +168,14 @@ def main(
         click.echo("Error: ANTHROPIC_API_KEY environment variable is not set.", err=True)
         sys.exit(1)
 
-    if retry_model is not None and retry_model not in _WHISPER_MODELS:
+    if retry_model is not None and retry_model not in WHISPER_MODELS:
         click.echo(
             f"Error: invalid --retry-model '{retry_model}'. "
-            f"Choices: {', '.join(_WHISPER_MODELS)}",
+            f"Choices: {', '.join(WHISPER_MODELS)}",
             err=True,
         )
         sys.exit(1)
-    retry_cap_idx = _WHISPER_MODELS.index(retry_model) if retry_model is not None else -1
+    retry_cap_idx = WHISPER_MODELS.index(retry_model) if retry_model is not None else -1
 
     try:
         audio.validate_audio_file(audio_file)
@@ -193,117 +189,144 @@ def main(
 
         with audio.prepare_audio(audio_file) as wav_path:
             thread_local = threading.local()
-            found: tuple[int, int] | None = None
-
+            found = threading.Event()
+            result_holder: list[tuple[int, int]] = []
             model_ready = threading.Event()
+            thread_errors: list[Exception] = []
+
             status = _StatusBar(llm_ready=not ollama)
+
+            def _load_model_thread():
+                try:
+                    provider.warm_up()
+                    model_ready.set()
+                    status.llm_ready = True
+                except Exception as e:
+                    thread_errors.append(e)
+                    found.set()
+                    model_ready.set()  # unblock validator
 
             with Live(status, console=_console, refresh_per_second=8):
                 if ollama:
-                    def _load_model():
-                        provider.warm_up()
-                        model_ready.set()
-                        status.llm_ready = True
-                    threading.Thread(target=_load_model, daemon=True, name="model-loader").start()
+                    threading.Thread(
+                        target=_load_model_thread, daemon=True, name="model-loader"
+                    ).start()
                 else:
                     model_ready.set()
 
                 with audio.split_wav(wav_path, segment_s=240.0, overlap_s=30.0) as chunks:
                     status.total = len(chunks)
+
+                    seg_q: queue.Queue = queue.Queue()
+                    trans_q: queue.Queue = queue.Queue()
+                    transcription_q: queue.Queue = queue.Queue()
+
                     for i, (chunk_path, offset_s, keep_until_s) in enumerate(chunks, 1):
-                        seg_end_s = (
-                            keep_until_s + 30.0
-                            if keep_until_s is not None
-                            else offset_s + 240.0
-                        )
-                        status.segment = i
-                        status.seg_start_s = offset_s
-                        status.seg_end_s = seg_end_s
+                        seg_q.put((chunk_path, offset_s, keep_until_s, i, len(chunks)))
+                    seg_q.put(None)
+
+                    # --- status + log callbacks ---
+
+                    def on_segment_start(seg_idx, total_segs, off_s, end_s):
+                        status.segment = seg_idx
+                        status.seg_start_s = off_s
+                        status.seg_end_s = end_s
                         status.phase = "diarizing"
 
-                        speaker_segs = _diarizer.run_diarization(chunk_path, offset_s)
-                        transitions = _diarizer.get_speaker_transitions(speaker_segs)
-
-                        if not transitions:
-                            _console.print(
-                                f"  [dim]Segment {i}/{len(chunks)}"
-                                f" [{_ts(offset_s)} – {_ts(seg_end_s)}]"
-                                f"  no transitions — skipped[/dim]"
-                            )
-                            continue
-
-                        for j, t in enumerate(transitions, 1):
-                            current_model = model
-                            models_tried: list[str] = []
-
-                            while True:
-                                status.phase = "transcribing"
-                                status.transition = j
-                                status.total_transitions = len(transitions)
-                                status.current_model = current_model
-
-                                with audio.extract_window(wav_path, t - 30.0, t + 30.0) as (win_path, win_start):
-                                    segs = transcriber.transcribe_segment(
-                                        win_path, win_start, keep_until_s=None,
-                                        model_size=current_model, thread_local=thread_local,
-                                    )
-
-                                models_tried.append(current_model)
-
-                                if verbose:
-                                    for seg in segs:
-                                        _console.print(
-                                            f"    [dim][{_ts(seg['start'])}] {seg['text']}[/dim]"
-                                        )
-
-                                status.phase = "validating"
-                                result = analyzer.is_sermon_transition(
-                                    segs, transition_t=t, provider=provider
-                                )
-
-                                # Quality-triggered retry: poor transcript + negative decision
-                                # → step up to the next larger model and retry, up to
-                                # --retry-model cap. A YES with poor quality is accepted as-is.
-                                if not result.quality_ok and not result.is_sermon:
-                                    next_m = _next_model(current_model)
-                                    if next_m and _WHISPER_MODELS.index(next_m) <= retry_cap_idx:
-                                        current_model = next_m
-                                        continue
-
-                                break
-
-                            model_chain = " → ".join(models_tried)
-                            entry = f"Segment {i} — transition {j}/{len(transitions)} at {_ts(t)}  {model_chain}"
-
-                            if result.is_sermon:
-                                found = (int(t) // 60, int(t) % 60)
-                                _console.print(f"  {entry} → [bold green]confirmed[/bold green]")
-                                _console.print(
-                                    f"[bold green]Sermon start found at {_ts(t)}[/bold green]"
-                                )
-                                break
-                            else:
-                                if result.uncertain:
-                                    outcome = "rejected [dim](uncertain)[/dim]"
-                                elif not result.quality_ok:
-                                    outcome = "rejected [dim](poor quality)[/dim]"
-                                else:
-                                    outcome = "rejected"
-                                _console.print(f"  [yellow]{entry} → {outcome}[/yellow]")
-
-                        if found:
-                            break
-
+                    def on_no_transitions(seg_idx, total_segs, off_s, end_s):
                         _console.print(
-                            f"  [dim]Segment {i}/{len(chunks)}"
-                            f" [{_ts(offset_s)} – {_ts(seg_end_s)}]"
-                            f"  {len(transitions)} transition(s) — no sermon start[/dim]"
+                            f"  [dim]Segment {seg_idx}/{total_segs}"
+                            f" [{_ts(off_s)} – {_ts(end_s)}]"
+                            f"  no transitions — skipped[/dim]"
                         )
 
-            if found is None:
+                    def on_transcribe_start(t, trans_idx, total_trans, seg_idx, m_size):
+                        status.phase = "transcribing"
+                        status.transition = trans_idx
+                        status.total_transitions = total_trans
+                        status.current_model = m_size
+
+                    def on_validate_start(t, trans_idx, total_trans, seg_idx):
+                        status.phase = "validating"
+                        status.transition = trans_idx
+                        status.total_transitions = total_trans
+
+                    def on_result(t, result, models_tried, segments, trans_idx, total_trans, seg_idx):
+                        if verbose:
+                            for seg in segments:
+                                _console.print(
+                                    f"    [dim][{_ts(seg['start'])}] {seg['text']}[/dim]"
+                                )
+                        model_chain = " → ".join(models_tried)
+                        entry = (
+                            f"Segment {seg_idx} — transition {trans_idx}/{total_trans}"
+                            f" at {_ts(t)}  {model_chain}"
+                        )
+                        if result.is_sermon:
+                            status.found_at_s = t
+                            _console.print(f"  {entry} → [bold green]confirmed[/bold green]")
+                            _console.print(
+                                f"[bold green]Sermon start found at {_ts(t)}[/bold green]"
+                            )
+                        else:
+                            if result.uncertain:
+                                outcome = "rejected [dim](uncertain)[/dim]"
+                            elif not result.quality_ok:
+                                outcome = "rejected [dim](poor quality)[/dim]"
+                            else:
+                                outcome = "rejected"
+                            _console.print(f"  [yellow]{entry} → {outcome}[/yellow]")
+
+                    def retranscribe(t, m_size):
+                        with audio.extract_window(wav_path, t - 30.0, t + 30.0) as (wp, ws):
+                            return transcriber.transcribe_segment(
+                                wp, ws, keep_until_s=None,
+                                model_size=m_size, thread_local=thread_local,
+                            )
+
+                    # --- thread launcher with exception capture ---
+
+                    def run_worker(name, target, *args, **kwargs):
+                        def _wrap():
+                            try:
+                                target(*args, **kwargs)
+                            except Exception as e:
+                                thread_errors.append(e)
+                                found.set()
+                        t = threading.Thread(target=_wrap, name=name, daemon=True)
+                        t.start()
+                        return t
+
+                    t_diarizer = run_worker(
+                        "diarizer", _diarizer.diarizer_worker,
+                        seg_q, trans_q, found,
+                        on_segment_start=on_segment_start,
+                        on_no_transitions=on_no_transitions,
+                    )
+                    t_transcriber = run_worker(
+                        "transcriber", transcriber.transcriber_worker,
+                        trans_q, transcription_q, found, wav_path, model, thread_local,
+                        on_transcribe_start=on_transcribe_start,
+                    )
+                    t_validator = run_worker(
+                        "validator", analyzer.validator_worker,
+                        transcription_q, found, model_ready, provider,
+                        retry_cap_idx, result_holder,
+                        retranscribe_fn=retranscribe,
+                        on_validate_start=on_validate_start,
+                        on_result=on_result,
+                    )
+
+                    for t in [t_diarizer, t_transcriber, t_validator]:
+                        t.join()
+
+            if thread_errors:
+                raise thread_errors[0]
+
+            if not result_holder:
                 raise ValueError("Could not find the sermon start in any detected transition.")
 
-            minutes, seconds = found
+            minutes, seconds = result_holder[0]
 
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)

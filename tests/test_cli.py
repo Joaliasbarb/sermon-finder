@@ -42,18 +42,18 @@ def _mock_pipeline(t: float = 180.0):
     return {
         "sermon_finder.cli.audio.prepare_audio": MagicMock(return_value=_make_cm("/tmp/audio.wav")),
         "sermon_finder.cli.audio.split_wav": MagicMock(return_value=_make_cm([("/tmp/c0.wav", 0.0, None)])),
-        "sermon_finder.cli._diarizer.run_diarization": MagicMock(
+        "sermon_finder.diarizer.run_diarization": MagicMock(
             return_value=[
                 {"speaker": "A", "start": 0.0, "end": t - 1},
                 {"speaker": "B", "start": t, "end": t + 10},
             ]
         ),
-        "sermon_finder.cli._diarizer.get_speaker_transitions": MagicMock(return_value=[t]),
-        "sermon_finder.cli.audio.extract_window": MagicMock(return_value=_make_cm(("/tmp/win.wav", max(0.0, t - 30.0)))),
-        "sermon_finder.cli.transcriber.transcribe_segment": MagicMock(
+        "sermon_finder.diarizer.get_speaker_transitions": MagicMock(return_value=[t]),
+        "sermon_finder.audio.extract_window": MagicMock(return_value=_make_cm(("/tmp/win.wav", max(0.0, t - 30.0)))),
+        "sermon_finder.transcriber.transcribe_segment": MagicMock(
             return_value=[{"start": t, "end": t + 5, "text": "test"}]
         ),
-        "sermon_finder.cli.analyzer.is_sermon_transition": MagicMock(return_value=_ok()),
+        "sermon_finder.analyzer.is_sermon_transition": MagicMock(return_value=_ok()),
     }
 
 
@@ -92,8 +92,8 @@ def test_sermon_not_found_exits_with_error(runner, sample_wav):
     mocks = {
         "sermon_finder.cli.audio.prepare_audio": MagicMock(return_value=_make_cm("/tmp/audio.wav")),
         "sermon_finder.cli.audio.split_wav": MagicMock(return_value=_make_cm([("/tmp/c0.wav", 0.0, None)])),
-        "sermon_finder.cli._diarizer.run_diarization": MagicMock(return_value=[]),
-        "sermon_finder.cli._diarizer.get_speaker_transitions": MagicMock(return_value=[]),
+        "sermon_finder.diarizer.run_diarization": MagicMock(return_value=[]),
+        "sermon_finder.diarizer.get_speaker_transitions": MagicMock(return_value=[]),
     }
     result = _run_with_mocks(runner, [sample_wav], mocks)
     assert result.exit_code == 1
@@ -104,16 +104,16 @@ def _base_mocks(t: float, transcribe_mock, llm_mock):
     return {
         "sermon_finder.cli.audio.prepare_audio": MagicMock(return_value=_make_cm("/tmp/audio.wav")),
         "sermon_finder.cli.audio.split_wav": MagicMock(return_value=_make_cm([("/tmp/c0.wav", 0.0, None)])),
-        "sermon_finder.cli._diarizer.run_diarization": MagicMock(
+        "sermon_finder.diarizer.run_diarization": MagicMock(
             return_value=[
                 {"speaker": "A", "start": 0.0, "end": t - 1},
                 {"speaker": "B", "start": t, "end": t + 10},
             ]
         ),
-        "sermon_finder.cli._diarizer.get_speaker_transitions": MagicMock(return_value=[t]),
-        "sermon_finder.cli.audio.extract_window": MagicMock(return_value=_make_cm(("/tmp/win.wav", t - 30.0))),
-        "sermon_finder.cli.transcriber.transcribe_segment": transcribe_mock,
-        "sermon_finder.cli.analyzer.is_sermon_transition": llm_mock,
+        "sermon_finder.diarizer.get_speaker_transitions": MagicMock(return_value=[t]),
+        "sermon_finder.audio.extract_window": MagicMock(return_value=_make_cm(("/tmp/win.wav", t - 30.0))),
+        "sermon_finder.transcriber.transcribe_segment": transcribe_mock,
+        "sermon_finder.analyzer.is_sermon_transition": llm_mock,
     }
 
 
