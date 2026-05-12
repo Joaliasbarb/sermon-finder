@@ -149,7 +149,7 @@ def main(
     The tool works in three steps:
       1. Convert the audio to a format Whisper can read
       2. Diarize 4-minute segments to detect speaker transitions
-      3. Transcribe a ±30s window around each transition and ask Claude yes/no
+      3. Transcribe a [t−30s, t+30s] window around each transition and ask Claude yes/no
 
     \b
     Output:
@@ -242,7 +242,7 @@ def main(
                                 status.total_transitions = len(transitions)
                                 status.current_model = current_model
 
-                                with audio.extract_window(wav_path, t - 30.0, t + 60.0) as (win_path, win_start):
+                                with audio.extract_window(wav_path, t - 30.0, t + 30.0) as (win_path, win_start):
                                     segs = transcriber.transcribe_segment(
                                         win_path, win_start, keep_until_s=None,
                                         model_size=current_model, thread_local=thread_local,
