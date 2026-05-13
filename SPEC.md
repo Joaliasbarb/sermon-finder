@@ -51,8 +51,8 @@ Find sermon-start timestamp in French Protestant church service audio. Output `m
 
 | id  | status | tag        | task | cites |
 |-----|--------|------------|------|-------|
-| T1  | .      |            | Add unit tests for `split_wav` overlap/dedup logic | V4 |
-| T2  | .      |            | Add unit tests for `extract_window` clamping | V5 |
+| T1  | x      |            | Add unit tests for `split_wav` overlap/dedup logic | V4 |
+| T2  | x      |            | Add unit tests for `extract_window` clamping | V5 |
 | T3  | .      |            | Interactive TUI: allow user to review and override rejected transitions | I.CLI |
 | T4  | .      |            | Track UNSURE transitions as potential-start candidates (log, don't discard) | V8 |
 | T5  | .      |            | Merge diarization transitions < N seconds apart before LLM validation | V4 |
