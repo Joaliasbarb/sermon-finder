@@ -1,7 +1,5 @@
 import os
-import queue
 import sys
-import threading
 import time
 from dataclasses import dataclass, field
 
@@ -184,176 +182,117 @@ def main(
         sys.exit(1)
 
     provider = OllamaProvider(model=ollama_model) if ollama else ClaudeProvider()
+
     try:
         _console.print("Preparing audio...", style="dim")
 
         with audio.prepare_audio(audio_file) as wav_path:
-            thread_local = threading.local()
-            found = threading.Event()
-            result_holder: list[tuple[int, int]] = []
-            model_ready = threading.Event()
-            thread_errors: list[Exception] = []
-
             status = _StatusBar(llm_ready=not ollama)
+            result_ts: tuple[int, int] | None = None
 
-            def _load_model_thread():
-                try:
-                    provider.warm_up()
-                    model_ready.set()
-                    status.llm_ready = True
-                except Exception as e:
-                    thread_errors.append(e)
-                    found.set()
-                    model_ready.set()  # unblock validator
+            try:
+                with Live(status, console=_console, refresh_per_second=8):
+                    if ollama:
+                        provider.warm_up()
+                        status.llm_ready = True
 
-            with Live(status, console=_console, refresh_per_second=8):
-                if ollama:
-                    threading.Thread(
-                        target=_load_model_thread, daemon=True, name="model-loader"
-                    ).start()
-                else:
-                    model_ready.set()
+                    with audio.split_wav(wav_path, segment_s=240.0, overlap_s=30.0) as chunks:
+                        status.total = len(chunks)
+                        model_cache: dict = {}
 
-                with audio.split_wav(wav_path, segment_s=240.0, overlap_s=30.0) as chunks:
-                    status.total = len(chunks)
-
-                    seg_q: queue.Queue = queue.Queue()
-                    trans_q: queue.Queue = queue.Queue()
-                    transcription_q: queue.Queue = queue.Queue()
-
-                    for i, (chunk_path, offset_s, keep_until_s) in enumerate(chunks, 1):
-                        seg_q.put((chunk_path, offset_s, keep_until_s, i, len(chunks)))
-                    seg_q.put(None)
-
-                    # log_q: worker threads enqueue pre-formatted rich markup strings;
-                    # the main thread drains and prints them. This avoids calling
-                    # _console.print() from background threads while Live holds its
-                    # internal lock, which can deadlock.
-                    log_q: queue.Queue = queue.Queue()
-
-                    # --- status + log callbacks ---
-
-                    def on_segment_start(seg_idx, total_segs, off_s, end_s):
-                        status.segment = seg_idx
-                        status.seg_start_s = off_s
-                        status.seg_end_s = end_s
-                        status.phase = "diarizing"
-
-                    def on_no_transitions(seg_idx, total_segs, off_s, end_s):
-                        log_q.put(
-                            f"  [dim]Segment {seg_idx}/{total_segs}"
-                            f" [{_ts(off_s)} – {_ts(end_s)}]"
-                            f"  no transitions — skipped[/dim]"
-                        )
-
-                    def on_transcribe_start(t, trans_idx, total_trans, seg_idx, m_size):
-                        status.phase = "transcribing"
-                        status.transition = trans_idx
-                        status.total_transitions = total_trans
-                        status.current_model = m_size
-
-                    def on_validate_start(t, trans_idx, total_trans, seg_idx):
-                        status.phase = "validating"
-                        status.transition = trans_idx
-                        status.total_transitions = total_trans
-
-                    def on_result(t, result, models_tried, segments, trans_idx, total_trans, seg_idx):
-                        if verbose:
-                            for seg in segments:
-                                log_q.put(
-                                    f"    [dim][{_ts(seg['start'])}] {seg['text']}[/dim]"
+                        def _retranscribe(t_val: float, m_size: str) -> list[dict]:
+                            with audio.extract_window(wav_path, t_val - 30.0, t_val + 30.0) as (wp, ws):
+                                return transcriber.transcribe_segment(
+                                    wp, ws, keep_until_s=None,
+                                    model_size=m_size, model_cache=model_cache,
                                 )
-                        model_chain = " → ".join(models_tried)
-                        entry = (
-                            f"Segment {seg_idx} — transition {trans_idx}/{total_trans}"
-                            f" at {_ts(t)}  {model_chain}"
-                        )
-                        if result.is_sermon:
-                            status.found_at_s = t
-                            log_q.put(f"  {entry} → [bold green]confirmed[/bold green]")
-                            log_q.put(
-                                f"[bold green]Sermon start found at {_ts(t)}[/bold green]"
+
+                        for i, (chunk_path, offset_s, keep_until_s) in enumerate(chunks, 1):
+                            seg_end_s = (
+                                keep_until_s + 30.0 if keep_until_s is not None
+                                else offset_s + 240.0
                             )
-                        else:
-                            if result.uncertain:
-                                outcome = "rejected [dim](uncertain)[/dim]"
-                            elif not result.quality_ok:
-                                outcome = "rejected [dim](poor quality)[/dim]"
-                            else:
-                                outcome = "rejected"
-                            log_q.put(f"  [yellow]{entry} → {outcome}[/yellow]")
+                            status.segment = i
+                            status.seg_start_s = offset_s
+                            status.seg_end_s = seg_end_s
+                            status.phase = "diarizing"
 
-                    def retranscribe(t, m_size):
-                        with audio.extract_window(wav_path, t - 30.0, t + 30.0) as (wp, ws):
-                            return transcriber.transcribe_segment(
-                                wp, ws, keep_until_s=None,
-                                model_size=m_size, thread_local=thread_local,
-                            )
+                            speaker_segs = _diarizer.run_diarization(chunk_path, offset_s)
+                            transitions = _diarizer.get_speaker_transitions(speaker_segs)
 
-                    # --- thread launcher with exception capture ---
+                            if not transitions:
+                                _console.print(
+                                    f"  [dim]Segment {i}/{len(chunks)}"
+                                    f" [{_ts(offset_s)} – {_ts(seg_end_s)}]"
+                                    f"  no transitions — skipped[/dim]"
+                                )
+                                continue
 
-                    def run_worker(name, target, *args, **kwargs):
-                        def _wrap():
-                            try:
-                                target(*args, **kwargs)
-                            except Exception as e:
-                                thread_errors.append(e)
-                                found.set()
-                        t = threading.Thread(target=_wrap, name=name, daemon=True)
-                        t.start()
-                        return t
+                            for j, t in enumerate(transitions, 1):
+                                status.phase = "transcribing"
+                                status.transition = j
+                                status.total_transitions = len(transitions)
+                                status.current_model = model
 
-                    t_diarizer = run_worker(
-                        "diarizer", _diarizer.diarizer_worker,
-                        seg_q, trans_q, found,
-                        on_segment_start=on_segment_start,
-                        on_no_transitions=on_no_transitions,
-                    )
-                    t_transcriber = run_worker(
-                        "transcriber", transcriber.transcriber_worker,
-                        trans_q, transcription_q, found, wav_path, model, thread_local,
-                        on_transcribe_start=on_transcribe_start,
-                    )
-                    t_validator = run_worker(
-                        "validator", analyzer.validator_worker,
-                        transcription_q, found, model_ready, provider,
-                        retry_cap_idx, result_holder,
-                        retranscribe_fn=retranscribe,
-                        on_validate_start=on_validate_start,
-                        on_result=on_result,
-                    )
+                                with audio.extract_window(wav_path, t - 30.0, t + 30.0) as (win_path, win_start):
+                                    segments = transcriber.transcribe_segment(
+                                        win_path, win_start, keep_until_s=None,
+                                        model_size=model, model_cache=model_cache,
+                                    )
 
-                    def _drain_log():
-                        while True:
-                            try:
-                                _console.print(log_q.get_nowait())
-                            except queue.Empty:
+                                if verbose:
+                                    for seg in segments:
+                                        _console.print(
+                                            f"    [dim][{_ts(seg['start'])}] {seg['text']}[/dim]"
+                                        )
+
+                                status.phase = "validating"
+
+                                result, models_tried = analyzer.validate_transition(
+                                    t, segments, model, provider, retry_cap_idx,
+                                    retranscribe_fn=_retranscribe,
+                                )
+
+                                model_chain = " → ".join(models_tried)
+                                entry = (
+                                    f"Segment {i} — transition {j}/{len(transitions)}"
+                                    f" at {_ts(t)}  {model_chain}"
+                                )
+
+                                if result.is_sermon:
+                                    status.found_at_s = t
+                                    _console.print(
+                                        f"  {entry} → [bold green]confirmed[/bold green]"
+                                    )
+                                    _console.print(
+                                        f"[bold green]Sermon start found at {_ts(t)}[/bold green]"
+                                    )
+                                    result_ts = (int(t) // 60, int(t) % 60)
+                                    break
+                                else:
+                                    if result.uncertain:
+                                        outcome = "rejected [dim](uncertain)[/dim]"
+                                    elif not result.quality_ok:
+                                        outcome = "rejected [dim](poor quality)[/dim]"
+                                    else:
+                                        outcome = "rejected"
+                                    _console.print(f"  [yellow]{entry} → {outcome}[/yellow]")
+
+                            if result_ts is not None:
                                 break
 
-                    threads = [t_diarizer, t_transcriber, t_validator]
+            except KeyboardInterrupt:
+                if ollama:
                     try:
-                        while any(t.is_alive() for t in threads):
-                            _drain_log()
-                            time.sleep(0.1)
-                        _drain_log()
-                    except KeyboardInterrupt:
-                        found.set()
-                        # os._exit bypasses Python GC so the ML library's C++
-                        # threads don't crash with std::terminate() during shutdown.
-                        if ollama:
-                            try:
-                                provider.teardown()
-                            except Exception:
-                                pass
-                        os._exit(130)
+                        provider.teardown()
+                    except Exception:
+                        pass
+                os._exit(130)
 
-            if thread_errors:
-                raise thread_errors[0]
-
-            if not result_holder:
+            if result_ts is None:
                 raise ValueError("Could not find the sermon start in any detected transition.")
 
-            minutes, seconds = result_holder[0]
+            minutes, seconds = result_ts
 
     except ValueError as e:
         click.echo(f"Error: {e}", err=True)

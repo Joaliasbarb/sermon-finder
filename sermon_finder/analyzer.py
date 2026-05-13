@@ -1,5 +1,3 @@
-import queue
-import threading
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -187,66 +185,33 @@ def _format_timestamp(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
-def validator_worker(
-    transcription_queue: queue.Queue,
-    found: threading.Event,
-    model_ready: threading.Event,
+def validate_transition(
+    t: float,
+    segments: list[dict],
+    model_size: str,
     provider: LLMProvider,
     retry_cap_idx: int,
-    result_holder: list,
     retranscribe_fn=None,
-    on_validate_start=None,
-    on_result=None,
-) -> None:
-    """Consume transcription_queue, validate with LLM, set found on YES.
+) -> tuple["TransitionResult", list[str]]:
+    """Validate one transition; retry with larger models on POOR+NO (V8).
 
-    transcription_queue items: (t, segments, model_size, segment_idx, transition_idx,
-                                 total_transitions, offset_s, seg_end_s)
-    retranscribe_fn(t, model_size) -> list[dict]  — called for POOR+NO retries (V8)
-    on_validate_start(t, transition_idx, total_transitions, segment_idx)
-    on_result(t, result, models_tried, segments, transition_idx, total_transitions, segment_idx)
+    retranscribe_fn(t, model_size) -> list[dict] — called on POOR+NO retry
+    Returns (result, models_tried).
     """
-    model_ready.wait()  # V13
+    current_model = model_size
+    models_tried: list[str] = []
     while True:
-        if found.is_set():  # V14
-            return
-        try:
-            item = transcription_queue.get(timeout=0.5)
-        except queue.Empty:
-            continue
-        if item is None:  # V15 — terminal stage, no next queue to forward to
-            return
-        t, segments, model_size, seg_idx, trans_idx, total_trans, offset_s, seg_end_s = item
-        if found.is_set():  # V14
-            return
-
-        current_model = model_size
-        models_tried: list[str] = []
-
-        while True:
-            models_tried.append(current_model)
-            if on_validate_start:
-                on_validate_start(t, trans_idx, total_trans, seg_idx)
-            result = is_sermon_transition(segments, transition_t=t, provider=provider)
-
-            if result.is_sermon:  # V8: YES accepted regardless of quality
-                result_holder.append((int(t) // 60, int(t) % 60))
-                if on_result:
-                    on_result(t, result, models_tried, segments, trans_idx, total_trans, seg_idx)
-                found.set()
-                return
-
-            # V8: retry only on POOR + NO
-            if not result.quality_ok and retranscribe_fn is not None:
-                next_m = _next_whisper_model(current_model, retry_cap_idx)
-                if next_m:
-                    segments = retranscribe_fn(t, next_m)
-                    current_model = next_m
-                    continue
-
-            if on_result:
-                on_result(t, result, models_tried, segments, trans_idx, total_trans, seg_idx)
-            break
+        models_tried.append(current_model)
+        result = is_sermon_transition(segments, transition_t=t, provider=provider)
+        if result.is_sermon:  # V8: YES accepted regardless of quality
+            return result, models_tried
+        if not result.quality_ok and retranscribe_fn is not None:
+            next_m = _next_whisper_model(current_model, retry_cap_idx)
+            if next_m:
+                segments = retranscribe_fn(t, next_m)
+                current_model = next_m
+                continue
+        return result, models_tried
 
 
 def _format_chunk(segments: list[dict], transition_t: float | None = None) -> str:
