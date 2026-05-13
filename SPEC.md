@@ -19,7 +19,7 @@ Find sermon-start timestamp in French Protestant church service audio. Output `m
 
 ## §I
 
-- CLI: `sermon-finder AUDIO_FILE [--model SIZE] [--retry-model SIZE] [-v/--verbose] [--ollama] [--ollama-model NAME]`
+- CLI: `sermon-finder AUDIO_FILE [--model SIZE] [--retry-model SIZE] [--window N] [-v/--verbose] [--ollama] [--ollama-model NAME] [--human]`
 - Config: `ANTHROPIC_API_KEY` env var or `.env` (loaded via python-dotenv)
 - Claude API: `claude-sonnet-4-5` via `anthropic` SDK; `max_tokens=50`
 - Ollama API: `POST /api/chat` at `localhost:11434`; `keep_alive=-1`; timeout 300s
@@ -38,12 +38,13 @@ Find sermon-start timestamp in French Protestant church service audio. Output `m
 | V2  | all progress/log output → stderr only |
 | V3  | exit code 1 on: missing API key \| bad/missing file \| unsupported format \| no sermon found |
 | V4  | overlap dedup: discard transitions where offset-corrected start ≥ `keep_until_s`; last segment keeps all (`keep_until_s=None`) |
-| V5  | transcription window = `[t−30, t+30]` seconds, clamped to `[0, audio_duration]` |
+| V5  | transcription window = `[t−N, t+N]` seconds where N = `--window` value (default 30); clamped to `[0, audio_duration]` |
 | V6  | `WhisperModel` instantiated lazily on first call; reused across all calls in the same run |
 | V7  | `_diarize()` called without `min_speakers` — auto-detect speaker count |
 | V8  | quality-triggered retry fires only when `POOR + NO`; `YES` accepted regardless of quality |
 | V9  | audio converted to 16 kHz mono WAV before any ML processing |
 | V10 | all temp files wrapped in context managers; cleanup on normal exit AND exception |
+| V16 | `--human` mode: no LLM call; ANTHROPIC_API_KEY not required; each transition validated by stdin prompt (y = confirm / n = reject / s = skip rest) |
 
 ---
 
@@ -53,7 +54,10 @@ Find sermon-start timestamp in French Protestant church service audio. Output `m
 |-----|--------|------------|------|-------|
 | T1  | x      |            | Add unit tests for `split_wav` overlap/dedup logic | V4 |
 | T2  | x      |            | Add unit tests for `extract_window` clamping | V5 |
-| T3  | .      |            | Interactive TUI: allow user to review and override rejected transitions | I.CLI |
+| T3  | .      | human      | Add `--human` flag: replace LLM call with stdin y/n/s prompt; show transcription; no API key required; stop on y | V16,I.CLI |
+| T14 | .      | human      | Add `--window N` option (default 30): replace hardcoded 30s in all `t ± 30` call sites; update V5 tests | V5,I.CLI |
+| T16 | .      | human      | Batch TUI (`textual`): live-updating selectable transition list; search continues in background; stops on user selection | V1,V2,I.CLI |
+| T17 | .      | human      | Audio playback in TUI: play transition window via `ffplay` subprocess when user focuses a row; requires T16 | V5,I.CLI |
 | T4  | .      |            | Track UNSURE transitions as potential-start candidates (log, don't discard) | V8 |
 | T5  | .      |            | Merge diarization transitions < N seconds apart before LLM validation | V4 |
 | T6  | x      |            | Add `OllamaProvider` implementing `LLMProvider` protocol; call local ollama REST API (`localhost:11434`) as drop-in replacement for `ClaudeProvider` | I.Claude |
